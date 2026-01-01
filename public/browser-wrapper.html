@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HipoCast Browser</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        html, body {
+            height: 100%;
+            overflow: hidden;
+            background: #0f172a;
+            font-family: system-ui, -apple-system, sans-serif;
+        }
+        
+        .titlebar {
+            height: 32px;
+            background: rgba(15, 23, 42, 0.95);
+            backdrop-filter: blur(8px);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 12px;
+            border-bottom: 1px solid rgba(51, 65, 85, 0.5);
+            user-select: none;
+            -webkit-app-region: drag;
+        }
+        
+        .titlebar-left {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .titlebar-icon {
+            width: 16px;
+            height: 16px;
+            background: linear-gradient(135deg, #8b5cf6, #7c3aed);
+            border-radius: 4px;
+        }
+        
+        .titlebar-title {
+            font-size: 12px;
+            font-weight: 600;
+            color: #94a3b8;
+            letter-spacing: 0.05em;
+        }
+        
+        .titlebar-controls {
+            display: flex;
+            gap: 2px;
+            opacity: 0;
+            transition: opacity 0.2s ease;
+            -webkit-app-region: no-drag;
+        }
+        
+        .titlebar:hover .titlebar-controls {
+            opacity: 1;
+        }
+        
+        .titlebar-btn {
+            width: 32px;
+            height: 32px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border: none;
+            background: transparent;
+            color: #94a3b8;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: all 0.15s ease;
+        }
+        
+        .titlebar-btn:hover {
+            background: rgba(51, 65, 85, 0.5);
+            color: white;
+        }
+        
+        .titlebar-btn.close:hover {
+            background: #ef4444;
+            color: white;
+        }
+        
+        .titlebar-btn svg {
+            width: 14px;
+            height: 14px;
+        }
+        
+        .content {
+            height: calc(100% - 32px);
+            width: 100%;
+        }
+        
+        .content iframe {
+            width: 100%;
+            height: 100%;
+            border: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="titlebar">
+        <div class="titlebar-left">
+            <div class="titlebar-icon"></div>
+            <span class="titlebar-title" id="title">HipoCast Browser</span>
+        </div>
+        <div class="titlebar-controls">
+            <button class="titlebar-btn" id="btn-minimize" title="Minimizar">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <line x1="5" y1="12" x2="19" y2="12"/>
+                </svg>
+            </button>
+            <button class="titlebar-btn" id="btn-maximize" title="Maximizar">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <rect x="4" y="4" width="16" height="16" rx="2"/>
+                </svg>
+            </button>
+            <button class="titlebar-btn close" id="btn-close" title="Fechar">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <line x1="6" y1="6" x2="18" y2="18"/>
+                    <line x1="6" y1="18" x2="18" y2="6"/>
+                </svg>
+            </button>
+        </div>
+    </div>
+    <div class="content">
+        <iframe id="browser-frame" src="about:blank" allow="autoplay; fullscreen; picture-in-picture" allowfullscreen></iframe>
+    </div>
+
+    <script>
+        // Get URL from query params
+        const params = new URLSearchParams(window.location.search);
+        const targetUrl = params.get('url');
+        const title = params.get('title') || 'Web Stream';
+        
+        // Set title and iframe src
+        document.getElementById('title').textContent = title;
+        if (targetUrl) {
+            document.getElementById('browser-frame').src = targetUrl;
+        }
+
+        // Window controls via Tauri API
+        const { getCurrentWindow } = window.__TAURI__.window;
+        const appWindow = getCurrentWindow();
+
+        document.getElementById('btn-minimize').addEventListener('click', () => {
+            appWindow.minimize();
+        });
+
+        document.getElementById('btn-maximize').addEventListener('click', async () => {
+            const isMaximized = await appWindow.isMaximized();
+            if (isMaximized) {
+                appWindow.unmaximize();
+            } else {
+                appWindow.maximize();
+            }
+        });
+
+        document.getElementById('btn-close').addEventListener('click', () => {
+            appWindow.close();
+        });
+    </script>
+</body>
+</html>
