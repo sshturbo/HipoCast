@@ -52,51 +52,72 @@ async fn start_browser_stream(
     title: String,
     custom_id: Option<String>
 ) -> Result<StatusResponse, String> {
-    // Não fechar janelas existentes - permitir múltiplas streams simultâneas
-
-    // 1. Create the source window - load external URL directly
-    // Note: For external URLs, we use system decorations since sites block iframe embedding
-    // and window.__TAURI__ isn't available in external pages for security
-    let label = format!("source_{}", uuid::Uuid::new_v4());
+    // Determinar o stream_id primeiro
+    let stream_id = custom_id.clone().unwrap_or_else(|| format!("browser_{}", uuid::Uuid::new_v4()));
     
-    // Get width/height from settings for matching capture resolution
-    let settings = state.db.get_settings().unwrap_or_default();
-    let win_width = settings.width as f64;
-    let win_height = settings.height as f64;
+    println!("🔍 Verificando janela existente para stream_id: '{}'", stream_id);
     
-    let window = tauri::WebviewWindowBuilder::new(
-        &app,
-        label,
-        tauri::WebviewUrl::External(url.parse().map_err(|_| "URL inválida")?)
-    )
-    .title(&format!("🔴 {} - HipoCast", title))
-    .inner_size(win_width, win_height)
-    .min_inner_size(640.0, 480.0)
-    .decorations(false)  // No decorations for clean capture
-    .resizable(true)
-    .shadow(true)
-    .center()
-    .build()
-    .map_err(|e| format!("Falha ao criar janela: {}", e))?;
-
-    // 3. Get Native HWND and create source_id for capture
-    let hwnd = window.hwnd().map_err(|_| "Falha ao obter HWND da janela")?;
-    let capture_source_id = format!("window:{}", hwnd.0 as usize);
+    // Verificar se já existe uma janela para este stream_id e obter o HWND
+    let capture_source_id = {
+        let b_wins = state.browser_windows.lock().unwrap();
+        if let Some(existing_window) = b_wins.get(&stream_id) {
+            // Tentar obter HWND da janela existente
+            if let Ok(hwnd) = existing_window.hwnd() {
+                let hwnd_id = format!("window:{}", hwnd.0 as usize);
+                println!("♻️ Reutilizando janela existente para stream '{}' (HWND: {})", stream_id, hwnd.0 as usize);
+                Some(hwnd_id)
+            } else {
+                println!("⚠️ Janela existe mas HWND inválido, será criada nova janela");
+                None
+            }
+        } else {
+            println!("🆕 Nenhuma janela existente para '{}', criando nova", stream_id);
+            None
+        }
+    };
     
-    // Use custom_id if provided, otherwise use the window HWND
-    let stream_id = if let Some(custom) = custom_id {
-        custom
+    // Se não existe janela válida, criar uma nova
+    let capture_source_id = if let Some(hwnd_id) = capture_source_id {
+        hwnd_id
     } else {
-        capture_source_id.clone()
+        // Criar nova janela
+        let label = format!("source_{}", uuid::Uuid::new_v4());
+        
+        // Get width/height from settings for matching capture resolution
+        let settings = state.db.get_settings().unwrap_or_default();
+        let win_width = settings.width as f64;
+        let win_height = settings.height as f64;
+        
+        let new_window = tauri::WebviewWindowBuilder::new(
+            &app,
+            label,
+            tauri::WebviewUrl::External(url.parse().map_err(|_| "URL inválida")?)
+        )
+        .title(&format!("🔴 {} - HipoCast", title))
+        .inner_size(win_width, win_height)
+        .min_inner_size(640.0, 480.0)
+        .decorations(false)
+        .resizable(true)
+        .shadow(true)
+        .center()
+        .build()
+        .map_err(|e| format!("Falha ao criar janela: {}", e))?;
+
+        let hwnd = new_window.hwnd().map_err(|_| "Falha ao obter HWND da janela")?;
+        let hwnd_id = format!("window:{}", hwnd.0 as usize);
+        
+        println!("✅ Nova janela criada para stream '{}' (HWND: {})", stream_id, hwnd.0 as usize);
+        
+        // Salvar janela no HashMap
+        {
+            let mut b_wins = state.browser_windows.lock().unwrap();
+            b_wins.insert(stream_id.clone(), new_window);
+        }
+        
+        hwnd_id
     };
 
-    // 3. Save window in HashMap using stream_id as key
-    {
-        let mut b_wins = state.browser_windows.lock().unwrap();
-        b_wins.insert(stream_id.clone(), window);
-    }
-
-    // 4. Delegate to existing capture logic with the custom ID (or window ID if no custom ID)
+    // Delegate to existing capture logic with the custom ID
     // Pass both the stream_id (for folders/files) and capture_source_id (for actual capture)
     start_source_capture_browser(app, state, stream_id, capture_source_id, title, "browser".to_string(), Some(url))
 }

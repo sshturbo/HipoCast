@@ -34,17 +34,24 @@ impl AudioCapture {
         let running = Arc::new(AtomicBool::new(true));
         let running_clone = running.clone();
 
+        // Create pipe name BEFORE thread so we can return it
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        let pipe_name = format!("\\\\.\\pipe\\live_go_audio_{}_{}", stream_id, timestamp);
+        let pipe_name_clone = pipe_name.clone();
+
         let handle = thread::spawn(move || {
             unsafe {
                 // Initialize COM
                 let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
 
-                // Create Named Pipe
-                let pipe_name = format!("\\\\.\\pipe\\live_go_audio_{}", stream_id);
-                let c_pipe_name = CString::new(pipe_name.clone()).unwrap();
+                // Use the pre-created pipe name
+                let c_pipe_name = CString::new(pipe_name_clone.clone()).unwrap();
                 let pc_pipe_name = PCSTR(c_pipe_name.as_ptr() as *const u8);
 
-                println!("🎧 Creating Audio Pipe: {}", pipe_name);
+                println!("🎧 Creating Audio Pipe: {}", pipe_name_clone);
 
                 let pipe_handle = CreateNamedPipeA(
                     pc_pipe_name,
@@ -199,16 +206,23 @@ impl MicrophoneCapture {
         let running = Arc::new(AtomicBool::new(true));
         let running_clone = running.clone();
 
+        // Create pipe name BEFORE thread so we can return it
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        let pipe_name = format!("\\\\.\\pipe\\live_go_mic_{}_{}", stream_id, timestamp);
+        let pipe_name_clone = pipe_name.clone();
+
         let handle = thread::spawn(move || {
             unsafe {
                 let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
 
-                // Create Named Pipe for Microphone
-                let pipe_name = format!("\\\\.\\pipe\\live_go_mic_{}", stream_id);
-                let c_pipe_name = CString::new(pipe_name.clone()).unwrap();
+                // Use the pre-created pipe name
+                let c_pipe_name = CString::new(pipe_name_clone.clone()).unwrap();
                 let pc_pipe_name = PCSTR(c_pipe_name.as_ptr() as *const u8);
 
-                println!("🎤 Creating Microphone Pipe: {}", pipe_name);
+                println!("🎤 Creating Microphone Pipe: {}", pipe_name_clone);
 
                 let pipe_handle = CreateNamedPipeA(
                     pc_pipe_name,

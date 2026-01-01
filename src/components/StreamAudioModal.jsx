@@ -132,14 +132,14 @@ export function StreamAudioModal({ streamId, streamTitle, isOpen, onClose }) {
                 // Buscar informações completas da stream do banco para saber como reiniciar
                 const streamInfo = await invoke('get_stream_info', { streamId });
                 
-                // Parar a captura atual
+                // Parar a captura atual (agora com kill() do FFmpeg, é instantâneo)
                 await stopStream(streamId);
                 
-                // Aguardar um pouco para o FFmpeg e os handles de áudio liberarem os recursos
-                await new Promise(resolve => setTimeout(resolve, 1200));
+                // Com o kill() do FFmpeg, os pipes são liberados imediatamente
+                // Apenas pequeno delay para garantir que o sistema operacional processou
+                await new Promise(resolve => setTimeout(resolve, 500));
                 
-                // Reiniciar de acordo com o tipo original (browser ou janela)
-                // IMPORTANTE: Passar o streamId original para manter a mesma URL
+                // Reiniciar imediatamente
                 if (streamInfo.sourceType === 'browser' && streamInfo.sourceUrl) {
                     await startBrowserStream(streamInfo.sourceUrl, streamTitle, streamId);
                 } else {

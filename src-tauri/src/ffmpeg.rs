@@ -444,14 +444,28 @@ impl FfmpegEncoder {
         Ok(())
     }
 
-    /// Stop FFmpeg process gracefully
+    /// Stop FFmpeg process immediately
     pub fn stop(&mut self) {
-        // Close stdin to signal end of stream
+        println!("🛑 Parando FFmpeg...");
+        
+        // Fechar stdin para sinalizar fim do stream
         drop(self.process.stdin.take());
         
-        // Wait for process to finish (with timeout)
-        let _ = self.process.wait();
-        println!("FFmpeg stopped");
+        // Matar o processo imediatamente ao invés de esperar
+        match self.process.kill() {
+            Ok(_) => {
+                println!("✅ Processo FFmpeg terminado");
+                // Aguardar para garantir que recursos sejam liberados
+                let _ = self.process.wait();
+            }
+            Err(e) => {
+                eprintln!("⚠️ Erro ao matar processo FFmpeg: {}", e);
+                // Tentar esperar mesmo assim
+                let _ = self.process.wait();
+            }
+        }
+        
+        println!("✅ FFmpeg completamente parado");
     }
 }
 
