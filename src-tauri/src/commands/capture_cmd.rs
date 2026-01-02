@@ -72,9 +72,8 @@ pub async fn start_browser_stream(
                 .inner_size(win_width, win_height)
                 .visible(true)
                 .center() // Centralizar para fácil acesso do usuário
-                // Flags para tentar contornar DRM/Black Screen (Netflix)
-                // msPlayReady: Desabilita DRM PlayReady do Edge
-                .additional_browser_args("--disable-features=msPlayReady")
+                // Flag msPlayReady removida temporariamente pois causou travamento no carregamento
+                // .additional_browser_args("--disable-features=msPlayReady")
                 .build()
                 .map_err(|e| format!("Failed to create stream window: {}", e))?;
 
@@ -86,7 +85,7 @@ pub async fn start_browser_stream(
 
         // Aguardar carregamento (opcional, pode ajustar conforme necessidade)
         tracing::debug!("⏳ Waiting for window creation...");
-        std::thread::sleep(std::time::Duration::from_millis(1000)); // Pequeno delay para garantir HWND
+        tokio::time::sleep(std::time::Duration::from_millis(1000)).await; // Sleep não-bloqueante
 
         let hwnd = window
             .hwnd()

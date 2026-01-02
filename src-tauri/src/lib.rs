@@ -113,16 +113,13 @@ pub fn run() {
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 // Feature "Smart Close":
-                // - Se live rodando (active_stream_id set): "Fechar" -> Tray (Protege a live)
+                // - Se live rodando (active_stream_id set) E não for Main: "Fechar" -> Tray (Protege a live)
                 // - Se live parada: "Fechar" -> Fecha realmente a janela
-                // - Janela Principal ("main"): Sempre Tray
+                // - Janela Principal ("main"): Comportamento padrão (Fecha/Encerra App)
 
                 let label = window.label();
                 if label == "main" {
-                    api.prevent_close();
-                    let _ = window.hide();
-                    let _ = window.set_skip_taskbar(true);
-                    return;
+                    return; // Permite fechar (encerra o app)
                 }
 
                 // Tentar acessar estado para verificar stream ativa
@@ -139,7 +136,7 @@ pub fn run() {
                         let _ = window.hide();
                         let _ = window.set_skip_taskbar(true);
                     }
-                    // Else: Allow close (sem prevent_close)
+                    // Else: Allow close
                 } else {
                     // Fallback se não conseguir estado (segurança: fecha)
                 }
