@@ -112,11 +112,37 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                // Feature "Fechar para Bandeja"
-                // O usuário solicitou que fechar a janela apenas a minimize/esconda
-                api.prevent_close();
-                let _ = window.hide();
-                let _ = window.set_skip_taskbar(true);
+                // Feature "Smart Close":
+                // - Se live rodando (active_stream_id set): "Fechar" -> Tray (Protege a live)
+                // - Se live parada: "Fechar" -> Fecha realmente a janela
+                // - Janela Principal ("main"): Sempre Tray
+
+                let label = window.label();
+                if label == "main" {
+                    api.prevent_close();
+                    let _ = window.hide();
+                    let _ = window.set_skip_taskbar(true);
+                    return;
+                }
+
+                // Tentar acessar estado para verificar stream ativa
+                let app = window.app_handle();
+                if let Some(state) = app.try_state::<AppState>() {
+                    let is_live_active = if let Ok(active) = state.active_stream_id.lock() {
+                        active.is_some()
+                    } else {
+                        false
+                    };
+
+                    if is_live_active {
+                        api.prevent_close();
+                        let _ = window.hide();
+                        let _ = window.set_skip_taskbar(true);
+                    }
+                    // Else: Allow close (sem prevent_close)
+                } else {
+                    // Fallback se não conseguir estado (segurança: fecha)
+                }
             }
         })
         .invoke_handler(tauri::generate_handler![
