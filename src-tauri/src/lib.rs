@@ -111,18 +111,12 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            match event {
-                // Implementando "Fechar para Bandeja"
-                // Como não conseguimos interceptar 'Minimized' facilmente na v2,
-                // interceptamos o 'Close' para manter o app rodando.
-                tauri::WindowEvent::CloseRequested { api, .. } => {
-                    // Impede o fechamento real
-                    api.prevent_close();
-                    // Esconde a janela e remove da barra de tarefas
-                    let _ = window.hide();
-                    let _ = window.set_skip_taskbar(true);
-                }
-                _ => {}
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                // Feature "Fechar para Bandeja"
+                // O usuário solicitou que fechar a janela apenas a minimize/esconda
+                api.prevent_close();
+                let _ = window.hide();
+                let _ = window.set_skip_taskbar(true);
             }
         })
         .invoke_handler(tauri::generate_handler![
