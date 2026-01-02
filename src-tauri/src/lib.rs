@@ -40,7 +40,6 @@ struct AppState {
     active_stream_id: Mutex<Option<String>>,
     browser_windows: Mutex<std::collections::HashMap<String, tauri::WebviewWindow>>, // Múltiplas janelas por stream_id
     db: Arc<Database>,
-    stream_config_db: Arc<stream_config::StreamConfigDb>,
     streams_path: std::path::PathBuf,
 }
 
@@ -154,9 +153,9 @@ fn start_source_capture_internal(
     
     // Fetch settings from DB
     let settings = state.db.get_settings().unwrap_or_default();
-    let stream_config_db = state.stream_config_db.clone();
+    let db = state.db.clone();
     
-    match capture::start_capture(app_handle, id.clone(), streams_dir_str.clone(), settings, stream_config_db) {
+    match capture::start_capture(app_handle, id.clone(), streams_dir_str.clone(), settings, db) {
         Ok(control) => {
             *handle = Some(Box::new(control));
             *active_id = Some(id.clone());
@@ -178,9 +177,9 @@ fn start_source_capture_internal(
             }
 
             // Criar configuração de áudio padrão baseada nas configurações globais apenas se não existir
-            if state.stream_config_db.get_config(&id).ok().flatten().is_none() {
-                let default_audio_config = state.stream_config_db.create_default_config_from_global(&id, &state.db);
-                if let Err(e) = state.stream_config_db.save_config(&default_audio_config) {
+            if state.db.get_stream_audio_config(&id).ok().flatten().is_none() {
+                let default_audio_config = state.db.create_default_audio_config_from_global(&id);
+                if let Err(e) = state.db.save_stream_audio_config(&default_audio_config) {
                     eprintln!("Failed to save default audio config: {}", e);
                 }
             }
@@ -205,8 +204,25 @@ fn start_source_capture_browser(
     let mut handle = state.capture_handle.lock().unwrap();
     let mut active_id = state.active_stream_id.lock().unwrap();
 
+    // FORCE STOP any existing capture before starting new one
     if handle.is_some() {
-        return Err("Capture already running".into());
+        println!("⚠️ Stopping existing capture before starting new one...");
+        let start_stop = std::time::Instant::now();
+        *handle = None; // Drop previous capture - fecha channel, para threads
+        drop(handle); // Libera lock para permitir cleanup
+        drop(active_id);
+        
+        // Aguarda threads finalizarem completamente (FFmpeg + audio)
+        // Tempo maior para garantir que FFmpeg flush buffers e feche pipes
+        println!("⏳ Waiting for FFmpeg and audio threads to finish...");
+        std::thread::sleep(std::time::Duration::from_millis(2500));
+        
+        let elapsed = start_stop.elapsed();
+        println!("✅ Previous capture stopped in {:.2}s, starting new one", elapsed.as_secs_f64());
+        
+        // Readquire locks
+        handle = state.capture_handle.lock().unwrap();
+        active_id = state.active_stream_id.lock().unwrap();
     }
 
     // Use the canonical global streams path from AppState
@@ -216,10 +232,10 @@ fn start_source_capture_browser(
     
     // Fetch settings from DB
     let settings = state.db.get_settings().unwrap_or_default();
-    let stream_config_db = state.stream_config_db.clone();
+    let db = state.db.clone();
     
     // Use capture_id for the actual capture but stream_id for everything else
-    match capture::start_capture_with_ids(app_handle, stream_id.clone(), capture_id, streams_dir_str.clone(), settings, stream_config_db) {
+    match capture::start_capture_with_ids(app_handle, stream_id.clone(), capture_id, streams_dir_str.clone(), settings, db) {
         Ok(control) => {
             *handle = Some(Box::new(control));
             *active_id = Some(stream_id.clone());
@@ -241,9 +257,9 @@ fn start_source_capture_browser(
             }
 
             // Criar configuração de áudio padrão baseada nas configurações globais apenas se não existir
-            if state.stream_config_db.get_config(&stream_id).ok().flatten().is_none() {
-                let default_audio_config = state.stream_config_db.create_default_config_from_global(&stream_id, &state.db);
-                if let Err(e) = state.stream_config_db.save_config(&default_audio_config) {
+            if state.db.get_stream_audio_config(&stream_id).ok().flatten().is_none() {
+                let default_audio_config = state.db.create_default_audio_config_from_global(&stream_id);
+                if let Err(e) = state.db.save_stream_audio_config(&default_audio_config) {
                     eprintln!("Failed to save default audio config: {}", e);
                 }
             }
@@ -314,7 +330,22 @@ fn stop_source_capture(state: State<'_, AppState>) -> StatusResponse {
         }
     }
     
-    *handle = None;
+    // FORÇA a finalização do CaptureHandle (drop) e espera threads terminarem
+    if handle.is_some() {
+        println!("🛑 Stopping capture and waiting for threads to finish...");
+        let start_stop = std::time::Instant::now();
+        *handle = None; // Drop CaptureHandle, fecha channel e para threads
+        drop(handle); // Libera o lock
+        
+        // Aguarda as threads finalizarem (FFmpeg e áudio)
+        // Tempo maior para garantir flush de buffers
+        println!("⏳ Waiting for FFmpeg and audio threads to finish...");
+        std::thread::sleep(std::time::Duration::from_millis(2500));
+        
+        let elapsed = start_stop.elapsed();
+        println!("✅ Capture stopped in {:.2}s, threads finished", elapsed.as_secs_f64());
+    }
+    
     *active_id = None;
 
     // NÃO fechar a janela do browser aqui - apenas ao remover ou iniciar nova stream
@@ -396,82 +427,93 @@ fn list_audio_sessions() -> Result<Vec<crate::audio::AudioSession>, String> {
 
 #[tauri::command]
 fn get_stream_audio_config(state: State<AppState>, stream_id: String) -> Result<stream_config::StreamAudioConfig, String> {
-    state.stream_config_db
-        .get_config(&stream_id)
+    state.db
+        .get_stream_audio_config(&stream_id)
         .map_err(|e| format!("DB error: {}", e))?
         .ok_or_else(|| "Config not found".to_string())
 }
 
 #[tauri::command]
 fn save_stream_audio_config(state: State<AppState>, config: stream_config::StreamAudioConfig) -> Result<(), String> {
-    state.stream_config_db
-        .save_config(&config)
+    state.db
+        .save_stream_audio_config(&config)
         .map_err(|e| format!("Failed to save config: {}", e))
 }
 
 #[tauri::command]
 fn delete_stream_audio_config(state: State<AppState>, stream_id: String) -> Result<(), String> {
-    state.stream_config_db
-        .delete_config(&stream_id)
+    state.db
+        .delete_stream_audio_config(&stream_id)
         .map_err(|e| format!("Failed to delete config: {}", e))
+}
+
+#[tauri::command]
+fn reset_stream_audio_config(state: State<AppState>, stream_id: String) -> Result<stream_config::StreamAudioConfig, String> {
+    // Deleta config existente
+    let _ = state.db.delete_stream_audio_config(&stream_id);
+    
+    // Cria novo config com defaults otimizados (sem filtros pesados)
+    let new_config = stream_config::StreamAudioConfig {
+        stream_id: stream_id.clone(),
+        audio_mode: "system".to_string(),
+        target_pid: None,
+        target_process_name: None,
+        enable_microphone: false,
+        microphone_device: "".to_string(),
+        audio_effects: stream_config::AudioEffects {
+            enabled: false,
+            preset: stream_config::AudioPreset::None,
+            custom_filters: None,
+            master_volume: 1.0,
+        },
+        microphone_effects: stream_config::MicrophoneEffects {
+            enabled: false,
+            preset: stream_config::MicrophonePreset::None,
+            custom_filters: None,
+            volume: 1.0,
+        },
+    };
+    
+    state.db
+        .save_stream_audio_config(&new_config)
+        .map_err(|e| format!("Failed to save reset config: {}", e))?;
+    
+    Ok(new_config)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    // Initialize DB in project root (outside src-tauri)
-    let exe_path = std::env::current_exe().unwrap();
-    // Go up from target/debug/deps/exe to project root (rust-app)
-    let base_dir = exe_path.parent().unwrap().parent().unwrap().parent().unwrap().parent().unwrap();
-    let db_path = base_dir.join("live-go.db");
+    // Determine executable directory
+    let exe_path = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let is_dev_env = exe_path.to_string_lossy().contains("target");
+    
+    // Database directory: same as executable (or project root in dev)
+    let db_dir = if is_dev_env {
+        // Dev Mode: go up from target/debug/rust-app.exe to project root
+        exe_path.parent()
+            .and_then(|p| p.parent())
+            .and_then(|p| p.parent())
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .to_path_buf()
+    } else {
+        // Production: same directory as executable
+        exe_path.parent()
+            .unwrap_or_else(|| std::path::Path::new("."))
+            .to_path_buf()
+    };
+    
+    println!("📂 Executável em: {}", exe_path.display());
+    println!("📂 Diretório de dados: {}", db_dir.display());
+    
+    // Initialize database in the same location as executable (contains all tables now)
+    let db_path = db_dir.join("hipocast.db");
+    println!("🗄️ Banco de dados: {}", db_path.display());
     
     let db = Database::init(&db_path).expect("Failed to init database");
     let db = Arc::new(db);
-    
-    // Initialize Stream Config DB (same location)
-    let stream_config_db_path = base_dir.join("stream_audio_config.db");
-    let stream_config_db = Arc::new(stream_config::StreamConfigDb::new(
-        &stream_config_db_path.to_string_lossy()
-    ).expect("Failed to init stream config database"));
 
-    // Resolve streams path ONCE at startup to ensure consistency across Server, Capture and Delete
-    // Heuristic: If we are in a 'target' folder, we are likely in 'cargo run' (Dev).
-    let exe_path = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    let is_dev_env = exe_path.to_string_lossy().contains("target");
-
-    // We can't access `app` here yet, so we have to resolve strict paths or defer
-    // Actually we need to do this resolution INSIDE setup or pass it.
-    // Ideally we verify the path in setup, but we need to pass it to Manage.
-    // Let's rely on standard directories for the 'manage' call, but we can't easily access app_local_data_dir without AppHandle.
-    // Workaround: We resolve it in `setup` and use a OnceLock or replace the state? 
-    // Easier: We do the determination logic HERE but map AppData manually if needed?
-    // Rust-Tauri: We can't access AppHandle before builder. 
-    // Solution: We initialize with a default, and Setup replaces it? No, State is immutable usually.
-    // Better: We calculate it robustly here.
-    
-    // For AppData on Windows we can use directories crate logic or env var if needed fallback.
-    // But simplest is:
-    
-    let streams_path = if is_dev_env {
-         // Dev Mode: up 4 levels
-         exe_path.parent()
-            .and_then(|p| p.parent()).and_then(|p| p.parent()).and_then(|p| p.parent()).and_then(|p| p.parent())
-            .map(|p| p.join("streams"))
-            .unwrap_or_else(|| std::path::PathBuf::from("streams")) // fallback to relative
-    } else {
-        // Production: Try Install Dir
-         if let Some(parent) = exe_path.parent() {
-            let local_streams = parent.join("streams");
-            if std::fs::create_dir_all(&local_streams).is_ok() && std::fs::write(local_streams.join(".tmptest"), "").is_ok() {
-                let _ = std::fs::remove_file(local_streams.join(".tmptest"));
-                local_streams
-            } else {
-                // Fallback to %LOCALAPPDATA%/rust-app/streams
-                dirs::data_local_dir().unwrap_or(std::path::PathBuf::from(".")).join("rust-app").join("streams")
-            }
-         } else {
-             dirs::data_local_dir().unwrap_or(std::path::PathBuf::from(".")).join("rust-app").join("streams")
-         }
-    };
+    // Streams path: same as database (next to executable)
+    let streams_path = db_dir.join("streams");
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -480,7 +522,6 @@ pub fn run() {
             active_stream_id: Mutex::new(None),
             browser_windows: Mutex::new(std::collections::HashMap::new()),
             db,
-            stream_config_db,
             streams_path: streams_path.clone(),
         })
         .setup(move |app| {
@@ -517,6 +558,7 @@ pub fn run() {
             get_stream_audio_config,
             save_stream_audio_config,
             delete_stream_audio_config,
+            reset_stream_audio_config,
             stream_config::get_suggested_audio_preset,
             stream_config::get_audio_presets_info,
             stream_config::get_microphone_presets_info,

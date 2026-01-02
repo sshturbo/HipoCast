@@ -7,7 +7,8 @@ use windows_capture::{
     window::Window,
 };
 use serde::{Serialize, Deserialize};
-use crate::stream_config::StreamConfigDb;
+use crate::db::Database;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct CaptureSource {
@@ -54,6 +55,19 @@ pub struct FrameData {
     pub data: Vec<u8>,
     pub width: u32,
     pub height: u32,
+}
+
+// Wrapper to hold capture control + stop signal
+pub struct CaptureHandle {
+    _control: CaptureControl<CaptureHandler, Box<dyn std::error::Error + Send + Sync>>,
+    pub stop_signal: Arc<AtomicBool>,
+}
+
+impl Drop for CaptureHandle {
+    fn drop(&mut self) {
+        println!("🛑 CaptureHandle dropped, sending stop signal...");
+        self.stop_signal.store(true, Ordering::Relaxed);
+    }
 }
 
 pub struct CaptureHandler {
@@ -125,14 +139,19 @@ pub fn start_capture(
     id: String, 
     output_dir: String, 
     settings_config: AppSettings,
-    stream_config_db: Arc<StreamConfigDb>
-) -> Result<CaptureControl<CaptureHandler, Box<dyn std::error::Error + Send + Sync>>, Box<dyn std::error::Error + Send + Sync>> {
+    db: Arc<Database>
+) -> Result<CaptureHandle, Box<dyn std::error::Error + Send + Sync>> {
     let (tx, rx) = channel::<FrameData>();
     let stream_id = id.clone().replace(":", "_");
     let output_dir_clone = output_dir.clone();
 
+    // Flag to signal thread stop
+    let should_stop = Arc::new(AtomicBool::new(false));
+    let should_stop_clone = should_stop.clone();
+
     // Spawn thread to handle FFmpeg HLS encoding
     thread::spawn(move || {
+        println!("🎬 FFmpeg thread started for stream: {}", stream_id);
         let mut ffmpeg: Option<FfmpegEncoder> = None;
         let mut audio_capture: Option<AudioCapture> = None;
         let mut mic_capture: Option<MicrophoneCapture> = None;
@@ -142,6 +161,13 @@ pub fn start_capture(
         let mut last_valid_frame: Option<FrameData> = None;
 
         loop {
+            // Check stop signal first
+            if should_stop_clone.load(Ordering::Relaxed) {
+                println!("🛑 Stop signal received. Stopping FFmpeg thread...");
+                println!("✅ FFmpeg thread finished successfully (stop signal)");
+                break;
+            }
+
             // 1. DRAIN CHANNEL: Only process the LATEST frame to prevent memory backlog (OOM)
             let mut latest_frame = None;
             let mut disconnected = false;
@@ -157,8 +183,9 @@ pub fn start_capture(
             }
 
             if disconnected {
-                println!("Channel disconnected. Stopping FFmpeg thread.");
-                break;
+                println!("🔌 Channel disconnected. Stopping FFmpeg thread...");
+                println!("✅ FFmpeg thread finished successfully (channel disconnect)");
+                break; // FFmpeg, audio_capture e mic_capture serão dropados automaticamente
             }
 
             if let Some(frame) = latest_frame {
@@ -169,7 +196,7 @@ pub fn start_capture(
 
                 if ffmpeg.is_none() {
                      // Load stream-specific audio config
-                     let stream_audio_config = stream_config_db.get_config(&stream_id).ok().flatten();
+                     let stream_audio_config = db.get_stream_audio_config(&stream_id).ok().flatten();
                      
                      let (enable_audio, enable_microphone, microphone_device, target_pid, audio_filters, microphone_filters) = if let Some(config) = stream_audio_config {
                          // Use stream-specific config
@@ -188,14 +215,24 @@ pub fn start_capture(
                      };
                      
                      // Start WASAPI Audio Capture if enabled (Before FFmpeg connects to pipe)
-                     if enable_audio {
-                         audio_capture = Some(AudioCapture::new(stream_id.clone(), target_pid));
-                     }
+                     let audio_pipe_name = if enable_audio {
+                         let capture = AudioCapture::new(stream_id.clone(), target_pid);
+                         let pipe_name = capture.pipe_name.clone();
+                         audio_capture = Some(capture);
+                         Some(pipe_name)
+                     } else {
+                         None
+                     };
                      
                      // Start WASAPI Microphone Capture if enabled
-                     if enable_microphone {
-                         mic_capture = Some(MicrophoneCapture::new(stream_id.clone()));
-                     }
+                     let mic_pipe_name = if enable_microphone {
+                         let capture = MicrophoneCapture::new(stream_id.clone());
+                         let pipe_name = capture.pipe_name.clone();
+                         mic_capture = Some(capture);
+                         Some(pipe_name)
+                     } else {
+                         None
+                     };
 
                      match FfmpegEncoder::new(
                         canvas_width,
@@ -217,6 +254,8 @@ pub fn start_capture(
                         microphone_device,
                         audio_filters,
                         microphone_filters,
+                        audio_pipe_name,
+                        mic_pipe_name,
                     ) {
                         Ok(enc) => {
                             ffmpeg = Some(enc);
@@ -359,7 +398,10 @@ pub fn start_capture(
         return Err("Invalid source ID".into());
     };
 
-    Ok(control)
+    Ok(CaptureHandle {
+        _control: control,
+        stop_signal: should_stop,
+    })
 }
 
 // Version for browser streams that separates stream_id (for folders) from capture_id (for actual capture)
@@ -369,14 +411,19 @@ pub fn start_capture_with_ids(
     capture_id: String,   // Real window ID for capture (window:HWND)
     output_dir: String, 
     settings_config: AppSettings,
-    stream_config_db: Arc<StreamConfigDb>
-) -> Result<CaptureControl<CaptureHandler, Box<dyn std::error::Error + Send + Sync>>, Box<dyn std::error::Error + Send + Sync>> {
+    db: Arc<Database>
+) -> Result<CaptureHandle, Box<dyn std::error::Error + Send + Sync>> {
     let (tx, rx) = channel::<FrameData>();
     let stream_id_sanitized = stream_id.clone().replace(":", "_");
     let output_dir_clone = output_dir.clone();
 
+    // Flag to signal thread stop
+    let should_stop = Arc::new(AtomicBool::new(false));
+    let should_stop_clone = should_stop.clone();
+
     // Spawn thread to handle FFmpeg HLS encoding (same as start_capture but uses stream_id for folders)
     thread::spawn(move || {
+        println!("🎬 FFmpeg thread started for browser stream: {}", stream_id_sanitized);
         let mut ffmpeg: Option<FfmpegEncoder> = None;
         let mut audio_capture: Option<AudioCapture> = None;
         let mut mic_capture: Option<MicrophoneCapture> = None;
@@ -386,6 +433,13 @@ pub fn start_capture_with_ids(
         let mut last_valid_frame: Option<FrameData> = None;
 
         loop {
+            // Check stop signal first
+            if should_stop_clone.load(Ordering::Relaxed) {
+                println!("🛑 Stop signal received. Stopping FFmpeg thread (browser stream)...");
+                println!("✅ FFmpeg thread finished successfully (stop signal)");
+                break;
+            }
+
             // 1. DRAIN CHANNEL: Only process the LATEST frame to prevent memory backlog (OOM)
             let mut latest_frame = None;
             let mut disconnected = false;
@@ -401,8 +455,9 @@ pub fn start_capture_with_ids(
             }
 
             if disconnected {
-                println!("Channel disconnected. Stopping FFmpeg thread.");
-                break;
+                println!("🔌 Channel disconnected. Stopping FFmpeg thread (browser stream)...");
+                println!("✅ FFmpeg thread finished successfully (channel disconnect)");
+                break; // FFmpeg, audio_capture e mic_capture serão dropados automaticamente
             }
 
             if let Some(frame) = latest_frame {
@@ -413,7 +468,7 @@ pub fn start_capture_with_ids(
 
                 if ffmpeg.is_none() {
                      // Load stream-specific audio config (use stream_id_sanitized)
-                     let stream_audio_config = stream_config_db.get_config(&stream_id_sanitized).ok().flatten();
+                     let stream_audio_config = db.get_stream_audio_config(&stream_id_sanitized).ok().flatten();
                      
                      let (enable_audio, enable_microphone, microphone_device, target_pid, audio_filters, microphone_filters) = if let Some(config) = stream_audio_config {
                          // Use stream-specific config
@@ -433,14 +488,24 @@ pub fn start_capture_with_ids(
                      };
                      
                      // Start WASAPI Audio Capture if enabled (Before FFmpeg connects to pipe)
-                     if enable_audio {
-                         audio_capture = Some(AudioCapture::new(stream_id_sanitized.clone(), target_pid));
-                     }
+                     let audio_pipe_name = if enable_audio {
+                         let capture = AudioCapture::new(stream_id_sanitized.clone(), target_pid);
+                         let pipe_name = capture.pipe_name.clone();
+                         audio_capture = Some(capture);
+                         Some(pipe_name)
+                     } else {
+                         None
+                     };
                      
                      // Start WASAPI Microphone Capture if enabled
-                     if enable_microphone {
-                         mic_capture = Some(MicrophoneCapture::new(stream_id_sanitized.clone()));
-                     }
+                     let mic_pipe_name = if enable_microphone {
+                         let capture = MicrophoneCapture::new(stream_id_sanitized.clone());
+                         let pipe_name = capture.pipe_name.clone();
+                         mic_capture = Some(capture);
+                         Some(pipe_name)
+                     } else {
+                         None
+                     };
 
                      // Use stream_id_sanitized for folder/file names
                      match FfmpegEncoder::new(
@@ -463,6 +528,8 @@ pub fn start_capture_with_ids(
                         microphone_device,
                         audio_filters,
                         microphone_filters,
+                        audio_pipe_name,
+                        mic_pipe_name,
                     ) {
                         Ok(enc) => {
                             ffmpeg = Some(enc);
@@ -584,5 +651,8 @@ pub fn start_capture_with_ids(
         return Err("Invalid capture ID".into());
     };
 
-    Ok(control)
+    Ok(CaptureHandle {
+        _control: control,
+        stop_signal: should_stop,
+    })
 }

@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::io::Write;
+use std::fs::OpenOptions;
 
 /// FFmpeg process wrapper for HLS streaming
 pub struct FfmpegEncoder {
@@ -41,8 +42,7 @@ impl FfmpegEncoder {
     }
 
     /// Start FFmpeg process for HLS streaming
-    /// Start FFmpeg process for HLS streaming
-    pub fn new(width: u32, height: u32, fps: u32, bitrate: u32, list_size: u32, hls_time: f64, output_dir: &str, stream_id: &str, enable_hw_accel: bool, ffmpeg_preset: String, enable_audio: bool, enable_microphone: bool, audio_bitrate: u32, audio_buffer_size: u32, audio_offset: i32, audio_device: String, microphone_device: String, audio_filters: String, microphone_filters: String) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    pub fn new(width: u32, height: u32, fps: u32, bitrate: u32, list_size: u32, hls_time: f64, output_dir: &str, stream_id: &str, enable_hw_accel: bool, ffmpeg_preset: String, enable_audio: bool, enable_microphone: bool, audio_bitrate: u32, audio_buffer_size: u32, audio_offset: i32, audio_device: String, microphone_device: String, audio_filters: String, microphone_filters: String, audio_pipe_name: Option<String>, mic_pipe_name: Option<String>) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let ffmpeg_path = Self::get_ffmpeg_path();
         
         let (codec, preset_args) = if enable_hw_accel {
@@ -72,23 +72,28 @@ impl FfmpegEncoder {
 
         Self::spawn_process(
             if ffmpeg_path.exists() { ffmpeg_path } else { PathBuf::from("ffmpeg") }, 
-            width, height, fps, bitrate, list_size, hls_time, output_dir, stream_id, codec, preset_args, enable_audio, enable_microphone, audio_bitrate, audio_buffer_size, audio_offset, audio_device, microphone_device, audio_filters, microphone_filters
+                width, height, fps, bitrate, list_size, hls_time, output_dir, stream_id, codec, preset_args, enable_audio, enable_microphone, audio_bitrate, audio_buffer_size, audio_offset, audio_device, microphone_device, audio_filters, microphone_filters, audio_pipe_name, mic_pipe_name
         )
     }
 
     fn detect_encoder(ffmpeg_path: &PathBuf) -> (String, Vec<String>) {
-        println!("🕵️ Detecting Hardware Encoders...");
+        let log_msg = format!("🕵️ Detecting Hardware Encoders...\n   FFmpeg path: {:?}\n", ffmpeg_path);
+        println!("{}", log_msg);
+        Self::write_log(&log_msg);
 
-        // List of candidate encoders in priority order
+        // List of candidate encoders in priority order (AMD first for Ryzen APUs)
         let candidates = [
-            ("h264_nvenc", vec!["-preset", "p1", "-rc", "cbr", "-gpu", "0"]), // NVIDIA with explicit GPU
-            ("h264_amf", vec!["-usage", "lowlatency", "-quality", "speed"]),   // AMD
-            ("h264_qsv", vec!["-preset", "veryfast", "-async_depth", "1"]),    // Intel
+            ("h264_amf", vec!["-usage", "lowlatency", "-quality", "speed"]),   // AMD Radeon (Simplificado para integrado)
+            ("h264_nvenc", vec!["-preset", "p1", "-tune", "ll"]), // NVIDIA
+            ("h264_qsv", vec!["-preset", "veryfast"]),    // Intel
         ];
 
         for (codec, preset) in candidates {
             if Self::test_encoder(ffmpeg_path, codec) {
-                println!("🚀 GPU Encoder Confirmed: Using {}", codec);
+                let success_msg = format!("🚀 GPU Encoder Confirmed: Using {} with preset {:?}\n", codec, preset);
+                println!("{}", success_msg);
+                Self::write_log(&success_msg);
+                
                 let mut args = vec![];
                 for p in preset {
                     args.push(p.to_string());
@@ -97,21 +102,53 @@ impl FfmpegEncoder {
             }
         }
 
-        println!("🐢 No working GPU Encoder found. Using CPU (libx264)");
-        ("libx264".to_string(), vec!["-preset".to_string(), "ultrafast".to_string(), "-tune".to_string(), "zerolatency".to_string()])
+        let fallback_msg = "⚠️ No GPU Encoder found. Falling back to CPU encoding\n   Isso causará alta CPU e possíveis travamentos\n";
+        println!("{}", fallback_msg);
+        Self::write_log(fallback_msg);
+        
+        ("libx264".to_string(), vec![
+            "-preset".to_string(), "veryfast".to_string(),
+            "-tune".to_string(), "zerolatency".to_string(),
+            "-threads".to_string(), "0".to_string(),
+        ])
+    }
+    
+    fn write_log(msg: &str) {
+        // Salva log no diretório do executável (mesma pasta do banco de dados)
+        let exe_path = std::env::current_exe().ok();
+        let log_dir = exe_path
+            .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+            .unwrap_or_else(|| PathBuf::from("."));
+        
+        let log_path = log_dir.join("hipocast_encoder.log");
+        
+        if let Ok(mut file) = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+        {
+            let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+            let _ = writeln!(file, "[{}] {}", timestamp, msg.trim());
+        }
     }
 
     /// Tests if an encoder is actually usable on the system
     fn test_encoder(ffmpeg_path: &PathBuf, codec: &str) -> bool {
+        let test_msg = format!("   📍 Testing {}...", codec);
+        println!("{}", test_msg);
+        Self::write_log(&test_msg);
+        
         // Run a tiny dummy encoding to see if hardware init succeeds
-        // ffmpeg -y -f lavfi -i color=c=black:s=64x64 -vframes 1 -an -c:v [CODEC] -f null -
+        // AMF requires minimum resolution (use 256x256 instead of 64x64)
         let mut cmd = Command::new(ffmpeg_path);
         cmd.args([
-                "-v", "error", // Only print errors
-                "-f", "lavfi", "-i", "color=c=black:s=64x64",
+                "-hide_banner",
+                "-v", "warning",
+                "-f", "lavfi", "-i", "color=c=black:s=256x256:d=0.1:r=30",
                 "-vframes", "1",
-                "-an", // No audio
+                "-an",
                 "-c:v", codec,
+                "-b:v", "1M",  // Add bitrate for AMF
                 "-f", "null", "-",
             ]);
         #[cfg(target_os = "windows")]
@@ -120,19 +157,38 @@ impl FfmpegEncoder {
             const CREATE_NO_WINDOW: u32 = 0x08000000;
             cmd.creation_flags(CREATE_NO_WINDOW);
         }
+        
+        let start = std::time::Instant::now();
         let output = cmd.output();
+        let elapsed = start.elapsed();
 
         match output {
             Ok(out) => {
                 if out.status.success() {
+                    let success = format!("   ✅ {} WORKS! (tested in {:?})", codec, elapsed);
+                    println!("{}", success);
+                    Self::write_log(&success);
                     true
                 } else {
                     let err = String::from_utf8_lossy(&out.stderr);
-                    println!("⚠️ Encoder {} check failed: {}", codec, err.trim());
+                    let fail_msg = format!("   ❌ {} FAILED (exit code: {:?})", codec, out.status.code());
+                    println!("{}", fail_msg);
+                    Self::write_log(&fail_msg);
+                    
+                    if !err.is_empty() && !err.contains("deprecated") {
+                        let reason = format!("      Reason: {}", err.trim().lines().next().unwrap_or(""));
+                        println!("{}", reason);
+                        Self::write_log(&reason);
+                    }
                     false
                 }
             },
-            Err(_) => false,
+            Err(e) => {
+                let error = format!("   ❌ {} failed to execute: {}", codec, e);
+                println!("{}", error);
+                Self::write_log(&error);
+                false
+            }
         }
     }
 
@@ -157,10 +213,15 @@ impl FfmpegEncoder {
         _microphone_device: String,
         audio_filters: String,
         microphone_filters: String,
+        audio_pipe_name: Option<String>,
+        mic_pipe_name: Option<String>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         // Create stream-specific subdirectory (e.g., streams/monitor_1)
         let stream_dir = format!("{}/{}", output_dir, stream_id);
+        
+        // FORCE CLEAN: Remove ALL old segments before starting
         if std::path::Path::new(&stream_dir).exists() {
+            println!("🧹 Cleaning old stream directory: {}", stream_dir);
             let _ = std::fs::remove_dir_all(&stream_dir);
         }
         std::fs::create_dir_all(&stream_dir)?;
@@ -169,8 +230,10 @@ impl FfmpegEncoder {
         let timestamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
         let segment_filename = format!("{}/{}_{}_seg_%03d.m4s", stream_dir, stream_id, timestamp);
         
+        println!("📹 HLS Config: list_size={}, hls_time={}, output={}", list_size, hls_time, output_path);
+        
         // HLS Settings
-        let mut hls_flags = "delete_segments+discont_start+independent_segments+round_durations+program_date_time".to_string();
+        let mut hls_flags = "delete_segments+discont_start+independent_segments+program_date_time".to_string();
         let mut hls_args = vec![
             "-f".to_string(), "hls".to_string(),
             "-hls_time".to_string(), hls_time.to_string(),
@@ -180,7 +243,7 @@ impl FfmpegEncoder {
         ];
 
         if list_size == 0 {
-            hls_flags = "discont_start+independent_segments+round_durations+program_date_time".to_string();
+            hls_flags = "discont_start+independent_segments+program_date_time".to_string();
             hls_args.extend_from_slice(&["-hls_playlist_type".to_string(), "event".to_string()]);
         }
         hls_args.extend_from_slice(&["-hls_flags".to_string(), hls_flags]);
@@ -191,8 +254,8 @@ impl FfmpegEncoder {
 
         // Audio Input Logic
         let mut video_input_index = 1;
-        let pipe_path = format!("\\\\.\\pipe\\live_go_audio_{}", stream_id);
-        let mic_pipe_path = format!("\\\\.\\pipe\\live_go_mic_{}", stream_id);
+        let pipe_path = audio_pipe_name.unwrap_or_else(|| format!("\\\\.\\pipe\\live_go_audio_{}", stream_id));
+        let mic_pipe_path = mic_pipe_name.unwrap_or_else(|| format!("\\\\.\\pipe\\live_go_mic_{}", stream_id));
 
         if enable_audio && enable_microphone {
             // CASE 1: BOTH System Audio (Pipe) + Microphone (Pipe WASAPI) -> Mix them

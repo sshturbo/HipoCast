@@ -22,11 +22,13 @@ pub struct AudioSession {
 pub struct AudioCapture {
     running: Arc<AtomicBool>,
     handle: Option<thread::JoinHandle<()>>,
+    pub pipe_name: String,
 }
 
 pub struct MicrophoneCapture {
     running: Arc<AtomicBool>,
     handle: Option<thread::JoinHandle<()>>,
+    pub pipe_name: String,
 }
 
 impl AudioCapture {
@@ -190,6 +192,7 @@ impl AudioCapture {
         Self {
             running,
             handle: Some(handle),
+            pipe_name,
         }
     }
 
@@ -346,6 +349,7 @@ impl MicrophoneCapture {
         Self {
             running,
             handle: Some(handle),
+            pipe_name,
         }
     }
 

@@ -45,7 +45,7 @@ impl Default for DbSettings {
             enable_microphone: false,
             audio_bitrate: 128,
             audio_buffer_size: 50,
-            audio_offset: 0,
+            audio_offset: 0,  // Sem offset por padrão (ajustar manualmente se necessário)
             audio_device: "virtual-audio-capturer".to_string(),
             microphone_device: "virtual-audio-capturer".to_string(),
             hls_list_size: 5,
@@ -54,9 +54,9 @@ impl Default for DbSettings {
             enable_hw_accel: true,
             ffmpeg_preset: "ultrafast".to_string(),
             global_audio_preset: "none".to_string(),
-            global_audio_volume: 0.7,
+            global_audio_volume: 1.0,
             global_audio_custom_filters: None,
-            global_microphone_preset: "balanced".to_string(),
+            global_microphone_preset: "none".to_string(),
             global_microphone_volume: 1.0,
             global_microphone_custom_filters: None,
         }
@@ -256,6 +256,9 @@ impl Database {
             let _ = conn.execute("ALTER TABLE streams ADD COLUMN source_url TEXT", []);
         }
 
+        // Initialize stream audio config table
+        Self::init_stream_audio_config_table(&conn)?;
+
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -374,6 +377,141 @@ impl Database {
     pub fn remove_stream(&self, id: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM streams WHERE id = ?1", params![id])?;
+        // Also remove stream audio config if exists
+        let _ = conn.execute("DELETE FROM stream_audio_config WHERE stream_id = ?1", params![id]);
         Ok(())
     }
 }
+
+// Stream Audio Configuration structures (moved from stream_config.rs)
+use crate::stream_config::{StreamAudioConfig, AudioEffects, MicrophoneEffects};
+
+impl Database {
+    /// Initialize stream audio config table (called during init)
+    fn init_stream_audio_config_table(conn: &Connection) -> Result<()> {
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS stream_audio_config (
+                stream_id TEXT PRIMARY KEY,
+                audio_mode TEXT NOT NULL DEFAULT 'system',
+                target_pid INTEGER,
+                target_process_name TEXT,
+                enable_microphone INTEGER NOT NULL DEFAULT 0,
+                microphone_device TEXT NOT NULL DEFAULT '',
+                audio_effects_enabled INTEGER NOT NULL DEFAULT 0,
+                audio_effects_preset TEXT NOT NULL DEFAULT 'cleanbalanced',
+                audio_effects_custom_filters TEXT,
+                audio_effects_master_volume REAL NOT NULL DEFAULT 0.7,
+                microphone_effects_enabled INTEGER NOT NULL DEFAULT 0,
+                microphone_effects_preset TEXT NOT NULL DEFAULT 'balanced',
+                microphone_effects_custom_filters TEXT,
+                microphone_effects_volume REAL NOT NULL DEFAULT 1.0
+            )",
+            [],
+        )?;
+        Ok(())
+    }
+    
+    /// Get stream-specific audio configuration
+    pub fn get_stream_audio_config(&self, stream_id: &str) -> Result<Option<StreamAudioConfig>> {
+        let conn = self.conn.lock().unwrap();
+        match conn.query_row(
+            "SELECT stream_id, audio_mode, target_pid, target_process_name, enable_microphone, microphone_device,
+                    audio_effects_enabled, audio_effects_preset, audio_effects_custom_filters, audio_effects_master_volume,
+                    microphone_effects_enabled, microphone_effects_preset, microphone_effects_custom_filters, microphone_effects_volume
+             FROM stream_audio_config WHERE stream_id = ?1",
+            params![stream_id],
+            |row| {
+                Ok(StreamAudioConfig {
+                    stream_id: row.get(0)?,
+                    audio_mode: row.get(1)?,
+                    target_pid: row.get::<_, Option<i64>>(2)?.map(|p| p as u32),
+                    target_process_name: row.get(3)?,
+                    enable_microphone: row.get::<_, i32>(4)? != 0,
+                    microphone_device: row.get(5)?,
+                    audio_effects: AudioEffects {
+                        enabled: row.get::<_, i32>(6)? != 0,
+                        preset: serde_json::from_str(&format!("\"{}\"", row.get::<_, String>(7)?)).unwrap_or_default(),
+                        custom_filters: row.get(8)?,
+                        master_volume: row.get(9)?,
+                    },
+                    microphone_effects: MicrophoneEffects {
+                        enabled: row.get::<_, i32>(10)? != 0,
+                        preset: serde_json::from_str(&format!("\"{}\"", row.get::<_, String>(11)?)).unwrap_or_default(),
+                        custom_filters: row.get(12)?,
+                        volume: row.get(13)?,
+                    },
+                })
+            },
+        ) {
+            Ok(config) => Ok(Some(config)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+    
+    /// Save or update stream audio configuration
+    pub fn save_stream_audio_config(&self, config: &StreamAudioConfig) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let audio_preset_str = format!("{:?}", config.audio_effects.preset).to_lowercase();
+        let mic_preset_str = format!("{:?}", config.microphone_effects.preset).to_lowercase();
+        
+        conn.execute(
+            "INSERT OR REPLACE INTO stream_audio_config 
+             (stream_id, audio_mode, target_pid, target_process_name, enable_microphone, microphone_device,
+              audio_effects_enabled, audio_effects_preset, audio_effects_custom_filters, audio_effects_master_volume,
+              microphone_effects_enabled, microphone_effects_preset, microphone_effects_custom_filters, microphone_effects_volume)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+            params![
+                config.stream_id,
+                config.audio_mode,
+                config.target_pid.map(|p| p as i64),
+                config.target_process_name,
+                config.enable_microphone as i32,
+                config.microphone_device,
+                config.audio_effects.enabled as i32,
+                audio_preset_str,
+                config.audio_effects.custom_filters,
+                config.audio_effects.master_volume,
+                config.microphone_effects.enabled as i32,
+                mic_preset_str,
+                config.microphone_effects.custom_filters,
+                config.microphone_effects.volume,
+            ],
+        )?;
+        Ok(())
+    }
+    
+    /// Delete stream audio configuration
+    pub fn delete_stream_audio_config(&self, stream_id: &str) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute("DELETE FROM stream_audio_config WHERE stream_id = ?1", params![stream_id])?;
+        Ok(())
+    }
+    
+    /// Create default audio config from global settings
+    pub fn create_default_audio_config_from_global(&self, stream_id: &str) -> StreamAudioConfig {
+        let settings = self.get_settings().unwrap_or_default();
+        
+        StreamAudioConfig {
+            stream_id: stream_id.to_string(),
+            audio_mode: if settings.enable_audio { "system" } else { "muted" }.to_string(),
+            target_pid: None,
+            target_process_name: None,
+            enable_microphone: settings.enable_microphone,
+            microphone_device: settings.microphone_device,
+            audio_effects: AudioEffects {
+                enabled: settings.global_audio_preset != "none",
+                preset: serde_json::from_str(&format!("\"{}\"", settings.global_audio_preset)).unwrap_or_default(),
+                custom_filters: settings.global_audio_custom_filters,
+                master_volume: settings.global_audio_volume,
+            },
+            microphone_effects: MicrophoneEffects {
+                enabled: settings.global_microphone_preset != "none",
+                preset: serde_json::from_str(&format!("\"{}\"", settings.global_microphone_preset)).unwrap_or_default(),
+                custom_filters: settings.global_microphone_custom_filters,
+                volume: settings.global_microphone_volume,
+            },
+        }
+    }
+}
+
