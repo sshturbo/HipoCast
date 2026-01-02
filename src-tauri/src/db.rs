@@ -44,8 +44,8 @@ impl Default for DbSettings {
             enable_audio: true,
             enable_microphone: false,
             audio_bitrate: 128,
-            audio_buffer_size: 50,
-            audio_offset: 0, 
+            audio_buffer_size: 20,
+            audio_offset: 0,
             audio_device: "".to_string(),
             microphone_device: "".to_string(),
             hls_list_size: 5,
@@ -71,8 +71,8 @@ pub struct DbStream {
     pub status: String,
     pub hls_path: String,
     pub created_at: String,
-    pub source_type: String,     
-    pub source_url: Option<String>, 
+    pub source_type: String,
+    pub source_url: Option<String>,
 }
 
 pub struct Database {

@@ -1,5 +1,6 @@
 mod capture;
-mod hls;
+mod encoder;
+mod output;
 mod server;
 
 mod db;
