@@ -207,7 +207,7 @@ impl FfmpegEncoder {
         enable_audio: bool,
         enable_microphone: bool,
         audio_bitrate: u32,
-        _audio_buffer_size: u32,
+        audio_buffer_size: u32,
         audio_offset: i32,
         audio_device: String,
         microphone_device: String,
@@ -269,6 +269,7 @@ impl FfmpegEncoder {
                 "-use_wallclock_as_timestamps", "1",  // Sincroniza com horário do sistema
                 "-i", &format!("audio={}", audio_device),
                 "-thread_queue_size", "512",
+                "-audio_buffer_size", &audio_buffer_size.to_string(),
             ]);
 
             // Input 1: Microphone via DirectShow (Direct!)
@@ -277,6 +278,7 @@ impl FfmpegEncoder {
                 "-use_wallclock_as_timestamps", "1",  // Sincroniza com horário do sistema
                 "-i", &format!("audio={}", microphone_device),
                 "-thread_queue_size", "512",
+                "-audio_buffer_size", &audio_buffer_size.to_string(),
             ]);
 
             // Complex Filter to mix them + apply audio effects
@@ -321,6 +323,7 @@ impl FfmpegEncoder {
                 "-use_wallclock_as_timestamps", "1",  // Sincroniza com horário do sistema
                 "-i", &format!("audio={}", audio_device),
                 "-thread_queue_size", "512",
+                "-audio_buffer_size", &audio_buffer_size.to_string(),
             ]);
             
             println!("🔊 System Audio Only: device='{}' (offset: {}ms)", audio_device, audio_offset);
@@ -338,6 +341,7 @@ impl FfmpegEncoder {
                 "-use_wallclock_as_timestamps", "1",  // Sincroniza com horário do sistema
                 "-i", &format!("audio={}", microphone_device),
                 "-thread_queue_size", "512",
+                "-audio_buffer_size", &audio_buffer_size.to_string(),
             ]);
             
             println!("🎤 Microphone Only: device='{}' (offset: {}ms)", microphone_device, audio_offset);
