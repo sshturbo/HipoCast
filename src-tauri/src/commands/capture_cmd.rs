@@ -70,9 +70,10 @@ pub async fn start_browser_stream(
             WebviewWindowBuilder::new(&app, &label, WebviewUrl::External(url.parse().unwrap()))
                 .title(&title)
                 .inner_size(win_width, win_height)
-                .visible(false) // Start invisible
+                .visible(true) // Necessário ser visível para API de captura do Windows funcionar
+                .position(-3000.0, 0.0) // "Ocultar" movendo para fora da tela
                 .build()
-                .map_err(|e| format!("Failed to create hidden window: {}", e))?;
+                .map_err(|e| format!("Failed to create off-screen window: {}", e))?;
 
         // Guardar referência da janela no mapa usando o stream_id
         {

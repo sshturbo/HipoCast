@@ -70,7 +70,7 @@ pub struct CaptureHandle {
 
 impl Drop for CaptureHandle {
     fn drop(&mut self) {
-        println!("🛑 CaptureHandle dropped, sending stop signal...");
+        tracing::info!("🛑 CaptureHandle dropped, sending stop signal...");
         self.stop_signal.store(true, Ordering::Relaxed);
     }
 }
@@ -88,6 +88,13 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
         frame: &mut Frame,
         _capture_control: InternalCaptureControl,
     ) -> Result<(), Self::Error> {
+        // Log only first frame to avoid flooding
+        static LOGGED_FIRST_FRAME: std::sync::atomic::AtomicBool =
+            std::sync::atomic::AtomicBool::new(false);
+        if !LOGGED_FIRST_FRAME.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            tracing::info!("📸 First frame arrived from Windows Capture API");
+        }
+
         let width = frame.width();
         let height = frame.height();
         let mut frame_buffer = frame.buffer()?;
@@ -101,7 +108,7 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
         // Defensive Check: Ensure data length is consistent with height and stride
         // prevents STATUS_STACK_BUFFER_OVERRUN during resolution transitions
         if data.len() < expected_total_len {
-            eprintln!(
+            tracing::warn!(
                 "⚠️ Frame data too small! Expected {}, got {}. Skipping corrupt frame.",
                 expected_total_len,
                 data.len()
@@ -130,10 +137,14 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
     }
 
     fn on_closed(&mut self) -> Result<(), Self::Error> {
+        tracing::warn!(
+            "⚠️ CaptureHandler::on_closed called! Windows Capture session ended unexpectedly."
+        );
         Ok(())
     }
 
     fn new(ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
+        tracing::info!("🆕 CaptureHandler initialized (Capture Session Started)");
         Ok(Self { sender: ctx.flags })
     }
 }
@@ -159,7 +170,7 @@ pub fn start_capture(
 
     // Spawn thread to handle FFmpeg HLS encoding
     thread::spawn(move || {
-        println!("🎬 FFmpeg thread started for stream: {}", stream_id);
+        tracing::info!("🎬 FFmpeg thread started for stream: {}", stream_id);
         let mut ffmpeg: Option<FfmpegEncoder> = None;
         let mut last_frame_time = std::time::Instant::now();
         let frame_interval =
@@ -170,8 +181,8 @@ pub fn start_capture(
         loop {
             // Check stop signal first
             if should_stop_clone.load(Ordering::Relaxed) {
-                println!("🛑 Stop signal received. Stopping FFmpeg thread...");
-                println!("✅ FFmpeg thread finished successfully (stop signal)");
+                tracing::info!("🛑 Stop signal received. Stopping FFmpeg thread...");
+                tracing::info!("✅ FFmpeg thread finished successfully (stop signal)");
                 break;
             }
 
@@ -190,8 +201,8 @@ pub fn start_capture(
             }
 
             if disconnected {
-                println!("🔌 Channel disconnected. Stopping FFmpeg thread...");
-                println!("✅ FFmpeg thread finished successfully (channel disconnect)");
+                tracing::warn!("🔌 Channel disconnected. Stopping FFmpeg thread...");
+                tracing::info!("✅ FFmpeg thread finished successfully (channel disconnect)");
                 break; // FFmpeg será dropado automaticamente
             }
 
@@ -266,13 +277,14 @@ pub fn start_capture(
                         Ok(enc) => {
                             ffmpeg = Some(enc);
                             last_frame_time = std::time::Instant::now(); // Reset on first frame
-                            println!(
+                            tracing::info!(
                                 "Capture initialized with Canvas at {}x{}",
-                                canvas_width, canvas_height
+                                canvas_width,
+                                canvas_height
                             );
                         }
                         Err(e) => {
-                            eprintln!("Failed to start FFmpeg: {:?}", e);
+                            tracing::error!("Failed to start FFmpeg: {:?}", e);
                             continue;
                         }
                     }
@@ -311,7 +323,7 @@ pub fn start_capture(
                     let options = ResizeOptions::new().resize_alg(ResizeAlg::Nearest);
 
                     if let Err(e) = resizer.resize(&src_image, &mut dst_image, &options) {
-                        eprintln!("Resize failed: {:?}", e);
+                        tracing::warn!("Resize failed: {:?}", e);
                         continue;
                     }
 
@@ -331,9 +343,10 @@ pub fn start_capture(
                 // Performance Monitor: Alert if scaling is too slow for 60fps
                 let elapsed = start_process.elapsed();
                 if elapsed > frame_interval {
-                    eprintln!(
+                    tracing::warn!(
                         "⚠️ Warning: Scaling lag detected! Processing took {:?}, limit is {:?}",
-                        elapsed, frame_interval
+                        elapsed,
+                        frame_interval
                     );
                 }
 
@@ -368,7 +381,7 @@ pub fn start_capture(
                                 // Silent exit
                                 break;
                             } else {
-                                eprintln!("Frame skip: size mismatch or error: {}", e);
+                                tracing::warn!("Frame skip: size mismatch or error: {}", e);
                             }
                         }
                     }
@@ -457,7 +470,7 @@ pub fn start_capture_with_ids(
 
     // Spawn thread to handle FFmpeg HLS encoding (same as start_capture but uses stream_id for folders)
     thread::spawn(move || {
-        println!(
+        tracing::info!(
             "🎬 FFmpeg thread started for browser stream: {}",
             stream_id_sanitized
         );
@@ -471,8 +484,10 @@ pub fn start_capture_with_ids(
         loop {
             // Check stop signal first
             if should_stop_clone.load(Ordering::Relaxed) {
-                println!("🛑 Stop signal received. Stopping FFmpeg thread (browser stream)...");
-                println!("✅ FFmpeg thread finished successfully (stop signal)");
+                tracing::info!(
+                    "🛑 Stop signal received. Stopping FFmpeg thread (browser stream)..."
+                );
+                tracing::info!("✅ FFmpeg thread finished successfully (stop signal)");
                 break;
             }
 
@@ -491,8 +506,10 @@ pub fn start_capture_with_ids(
             }
 
             if disconnected {
-                println!("🔌 Channel disconnected. Stopping FFmpeg thread (browser stream)...");
-                println!("✅ FFmpeg thread finished successfully (channel disconnect)");
+                tracing::warn!(
+                    "🔌 Channel disconnected. Stopping FFmpeg thread (browser stream)..."
+                );
+                tracing::info!("✅ FFmpeg thread finished successfully (channel disconnect)");
                 break; // FFmpeg será dropado automaticamente
             }
 
@@ -577,7 +594,7 @@ pub fn start_capture_with_ids(
                             );
                         }
                         Err(e) => {
-                            eprintln!("Failed to start FFmpeg: {:?}", e);
+                            tracing::error!("Failed to start FFmpeg: {:?}", e);
                             continue;
                         }
                     }
@@ -616,7 +633,7 @@ pub fn start_capture_with_ids(
                     let options = ResizeOptions::new().resize_alg(ResizeAlg::Nearest);
 
                     if let Err(e) = resizer.resize(&src_image, &mut dst_image, &options) {
-                        eprintln!("Resize failed: {:?}", e);
+                        tracing::warn!("Resize failed: {:?}", e);
                         continue;
                     }
 
@@ -636,23 +653,24 @@ pub fn start_capture_with_ids(
                 // ENCODE FRAME if available
                 if let (Some(enc), Some(valid_frame)) = (ffmpeg.as_mut(), &last_valid_frame) {
                     if let Err(e) = enc.write_frame(&valid_frame.data) {
-                        eprintln!("FFmpeg encode error: {:?}", e);
+                        tracing::error!("FFmpeg encode error: {:?}", e);
                     }
                 }
 
                 let elapsed_process = start_process.elapsed();
 
-                if elapsed_process > std::time::Duration::from_millis(10) {
-                    eprintln!(
-                        "⚠️ Frame processing took {:?} (>10ms). Risk of frame drop.",
-                        elapsed_process
+                if elapsed_process > frame_interval.mul_f32(0.8) {
+                    tracing::warn!(
+                        "⚠️ Frame processing took {:?} (limit: {:?}). Risk of frame drop.",
+                        elapsed_process,
+                        frame_interval
                     );
                 }
             } else if last_valid_frame.is_some() {
                 // No new frame but we have a valid one cached
                 if let (Some(enc), Some(valid_frame)) = (ffmpeg.as_mut(), &last_valid_frame) {
                     if let Err(e) = enc.write_frame(&valid_frame.data) {
-                        eprintln!("FFmpeg encode error (cached): {:?}", e);
+                        tracing::error!("FFmpeg encode error (cached): {:?}", e);
                     }
                 }
             }
