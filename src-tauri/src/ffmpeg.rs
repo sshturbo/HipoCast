@@ -42,7 +42,7 @@ impl FfmpegEncoder {
     }
 
     /// Start FFmpeg process for HLS streaming
-    pub fn new(width: u32, height: u32, fps: u32, bitrate: u32, list_size: u32, hls_time: f64, output_dir: &str, stream_id: &str, enable_hw_accel: bool, ffmpeg_preset: String, enable_audio: bool, enable_microphone: bool, audio_bitrate: u32, audio_buffer_size: u32, audio_offset: i32, audio_device: String, microphone_device: String, audio_filters: String, microphone_filters: String, audio_pipe_name: Option<String>, mic_pipe_name: Option<String>) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    pub fn new(width: u32, height: u32, fps: u32, bitrate: u32, list_size: u32, hls_time: f64, output_dir: &str, stream_id: &str, enable_hw_accel: bool, ffmpeg_preset: String, enable_audio: bool, enable_microphone: bool, audio_bitrate: u32, audio_buffer_size: u32, audio_offset: i32, audio_device: String, microphone_device: String, audio_filters: String, microphone_filters: String) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let ffmpeg_path = Self::get_ffmpeg_path();
         
         let (codec, preset_args) = if enable_hw_accel {
@@ -72,7 +72,7 @@ impl FfmpegEncoder {
 
         Self::spawn_process(
             if ffmpeg_path.exists() { ffmpeg_path } else { PathBuf::from("ffmpeg") }, 
-                width, height, fps, bitrate, list_size, hls_time, output_dir, stream_id, codec, preset_args, enable_audio, enable_microphone, audio_bitrate, audio_buffer_size, audio_offset, audio_device, microphone_device, audio_filters, microphone_filters, audio_pipe_name, mic_pipe_name
+                width, height, fps, bitrate, list_size, hls_time, output_dir, stream_id, codec, preset_args, enable_audio, enable_microphone, audio_bitrate, audio_buffer_size, audio_offset, audio_device, microphone_device, audio_filters, microphone_filters
         )
     }
 
@@ -209,12 +209,10 @@ impl FfmpegEncoder {
         audio_bitrate: u32,
         _audio_buffer_size: u32,
         audio_offset: i32,
-        _audio_device: String,
-        _microphone_device: String,
+        audio_device: String,
+        microphone_device: String,
         audio_filters: String,
         microphone_filters: String,
-        audio_pipe_name: Option<String>,
-        mic_pipe_name: Option<String>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         // Create stream-specific subdirectory (e.g., streams/monitor_1)
         let stream_dir = format!("{}/{}", output_dir, stream_id);
@@ -252,10 +250,8 @@ impl FfmpegEncoder {
         let mut command = Command::new(ffmpeg_path);
         command.args(["-y", "-fflags", "+genpts"]);
 
-        // Audio Input Logic
-        let mut video_input_index = 1;
-        let pipe_path = audio_pipe_name.unwrap_or_else(|| format!("\\\\.\\pipe\\live_go_audio_{}", stream_id));
-        let mic_pipe_path = mic_pipe_name.unwrap_or_else(|| format!("\\\\.\\pipe\\live_go_mic_{}", stream_id));
+        // Audio Input Logic - Native WASAPI/DirectShow (NO PIPES!)
+        let video_input_index;
 
         if enable_audio && enable_microphone {
             // CASE 1: BOTH System Audio (Pipe) + Microphone (Pipe WASAPI) -> Mix them
@@ -267,90 +263,89 @@ impl FfmpegEncoder {
                 command.args(["-itsoffset", &format!("{:.3}", offset_sec)]);
             }
 
-            // Input 0: System Audio via Named Pipe (WASAPI Loopback)
+            // Input 0: System Audio via DirectShow (Direct!)
             command.args([
-                "-f", "f32le", 
-                "-ar", "48000", 
-                "-ac", "2",
-                "-thread_queue_size", "2048",
-                "-i", &pipe_path
+                "-f", "dshow",
+                "-use_wallclock_as_timestamps", "1",  // Sincroniza com horário do sistema
+                "-i", &format!("audio={}", audio_device),
+                "-thread_queue_size", "512",
             ]);
 
-            // Input 1: Microphone via Named Pipe (WASAPI Capture)
+            // Input 1: Microphone via DirectShow (Direct!)
             command.args([
-                "-f", "f32le", 
-                "-ar", "48000", 
-                "-ac", "2",
-                "-thread_queue_size", "2048",
-                "-i", &mic_pipe_path
+                "-f", "dshow",
+                "-use_wallclock_as_timestamps", "1",  // Sincroniza com horário do sistema
+                "-i", &format!("audio={}", microphone_device),
+                "-thread_queue_size", "512",
             ]);
 
             // Complex Filter to mix them + apply audio effects
             let mix_filter = match (!audio_filters.is_empty(), !microphone_filters.is_empty()) {
                 (true, true) => {
                     // Both have filters: apply filters to each input, then mix
-                    format!("[0:a]aresample=48000,{}[a0];[1:a]aresample=48000,{}[a1];[a0][a1]amix=inputs=2:duration=longest[outa]", 
+                    format!("[0:a]aresample=48000,aformat=channel_layouts=stereo,{}[a0];[1:a]aresample=48000,aformat=channel_layouts=stereo,{}[a1];[a0][a1]amerge=inputs=2,pan=stereo|c0<c0+c2|c1<c1+c3[outa]", 
                             audio_filters, microphone_filters)
                 },
                 (true, false) => {
                     // Only system audio has filters
-                    format!("[0:a]aresample=48000,{}[a0];[1:a]aresample=48000[a1];[a0][a1]amix=inputs=2:duration=longest[outa]", 
+                    format!("[0:a]aresample=48000,aformat=channel_layouts=stereo,{}[a0];[1:a]aresample=48000,aformat=channel_layouts=stereo[a1];[a0][a1]amerge=inputs=2,pan=stereo|c0<c0+c2|c1<c1+c3[outa]", 
                             audio_filters)
                 },
                 (false, true) => {
                     // Only microphone has filters
-                    format!("[0:a]aresample=48000[a0];[1:a]aresample=48000,{}[a1];[a0][a1]amix=inputs=2:duration=longest[outa]", 
+                    format!("[0:a]aresample=48000,aformat=channel_layouts=stereo[a0];[1:a]aresample=48000,aformat=channel_layouts=stereo,{}[a1];[a0][a1]amerge=inputs=2,pan=stereo|c0<c0+c2|c1<c1+c3[outa]", 
                             microphone_filters)
                 },
                 (false, false) => {
                     // No filters for either
-                    "[0:a]aresample=48000[a0];[1:a]aresample=48000[a1];[a0][a1]amix=inputs=2:duration=longest[outa]".to_string()
+                    "[0:a]aresample=48000,aformat=channel_layouts=stereo[a0];[1:a]aresample=48000,aformat=channel_layouts=stereo[a1];[a0][a1]amerge=inputs=2,pan=stereo|c0<c0+c2|c1<c1+c3[outa]".to_string()
                 }
             };
             command.args(["-filter_complex", &mix_filter]);
             
-             println!("🎤🔊 Mixing Audio: SystemPipe='{}' + MicPipe='{}' (offset: {}ms, sys_filters: {}, mic_filters: {})", 
-                      pipe_path, mic_pipe_path, audio_offset, 
+             println!("🎤🔊 Mixing Audio: System='{}' + Mic='{}' (offset: {}ms, sys_filters: {}, mic_filters: {})",
+                      audio_device, microphone_device, audio_offset, 
                       if audio_filters.is_empty() { "none" } else { &audio_filters },
                       if microphone_filters.is_empty() { "none" } else { &microphone_filters });
 
         } else if enable_audio {
-            // CASE 2: System Audio ONLY (Pipe)
+            // CASE 2: System Audio ONLY (DirectShow)
+            video_input_index = 1;
             if audio_offset != 0 {
                 let offset_sec = audio_offset as f64 / 1000.0;
                 command.args(["-itsoffset", &format!("{:.3}", offset_sec)]);
             }
             
             command.args([
-                "-f", "f32le", 
-                "-ar", "48000", 
-                "-ac", "2",
-                "-thread_queue_size", "2048",
-                "-i", &pipe_path
+                "-f", "dshow",
+                "-use_wallclock_as_timestamps", "1",  // Sincroniza com horário do sistema
+                "-i", &format!("audio={}", audio_device),
+                "-thread_queue_size", "512",
             ]);
             
-            println!("🔊 System Audio Only: pipe='{}' (offset: {}ms)", pipe_path, audio_offset);
+            println!("🔊 System Audio Only: device='{}' (offset: {}ms)", audio_device, audio_offset);
 
         } else if enable_microphone {
-            // CASE 3: Microphone ONLY (WASAPI)
+            // CASE 3: Microphone ONLY (DirectShow)
+            video_input_index = 1;
             if audio_offset != 0 {
                  let offset_sec = audio_offset as f64 / 1000.0;
                  command.args(["-itsoffset", &format!("{:.3}", offset_sec)]);
             }
             
             command.args([
-                "-f", "f32le", 
-                "-ar", "48000", 
-                "-ac", "2",
-                "-thread_queue_size", "2048",
-                "-i", &mic_pipe_path
+                "-f", "dshow",
+                "-use_wallclock_as_timestamps", "1",  // Sincroniza com horário do sistema
+                "-i", &format!("audio={}", microphone_device),
+                "-thread_queue_size", "512",
             ]);
             
-            println!("🎤 Microphone Only: pipe='{}' (offset: {}ms)", mic_pipe_path, audio_offset);
+            println!("🎤 Microphone Only: device='{}' (offset: {}ms)", microphone_device, audio_offset);
 
         } else {
             // CASE 4: No Audio (Silent Fallback)
             command.args(["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo"]);
+            video_input_index = 1;
             
             println!("🔇 Audio disabled: Using silent audio track");
         }

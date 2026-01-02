@@ -112,11 +112,12 @@ export async function updateSettings(settings) {
 }
 
 /**
- * Lista dispositivos de áudio via FFmpeg
+ * Lista dispositivos de áudio via FFmpeg DirectShow
+ * Retorna: [{ name: string, deviceType: "loopback" | "input" }]
  */
 export async function listAudioDevices() {
     try {
-        return await invoke('list_audio_devices');
+        return await invoke('list_audio_devices_ffmpeg');
     } catch (error) {
         console.error('Erro ao listar dispositivos de áudio:', error);
         return [];
@@ -125,11 +126,14 @@ export async function listAudioDevices() {
 
 /**
  * Lista aplicações ativas com áudio (Audio Sessions)
+ * NOTA: Função desabilitada após refatoração para FFmpeg DirectShow
  * Retorna: [{ process_id, process_name, display_name, icon_path }]
  */
 export async function listAudioSessions() {
     try {
-        return await invoke('list_audio_sessions');
+        // Função removida após refatoração - retorna array vazio
+        console.warn('listAudioSessions foi removida após refatoração para FFmpeg DirectShow');
+        return [];
     } catch (error) {
         console.error('Erro ao listar audio sessions:', error);
         return [];

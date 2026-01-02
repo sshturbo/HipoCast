@@ -45,9 +45,9 @@ impl Default for DbSettings {
             enable_microphone: false,
             audio_bitrate: 128,
             audio_buffer_size: 50,
-            audio_offset: 0,  // Sem offset por padrão (ajustar manualmente se necessário)
-            audio_device: "virtual-audio-capturer".to_string(),
-            microphone_device: "virtual-audio-capturer".to_string(),
+            audio_offset: 0, 
+            audio_device: "".to_string(),
+            microphone_device: "".to_string(),
             hls_list_size: 5,
             width: 1280,
             height: 720,
@@ -71,8 +71,8 @@ pub struct DbStream {
     pub status: String,
     pub hls_path: String,
     pub created_at: String,
-    pub source_type: String,  // "window" ou "browser"
-    pub source_url: Option<String>,  // URL se for browser stream
+    pub source_type: String,     
+    pub source_url: Option<String>, 
 }
 
 pub struct Database {
@@ -82,7 +82,7 @@ pub struct Database {
 impl Database {
     pub fn init(path: &Path) -> Result<Self> {
         let conn = Connection::open(path)?;
-        
+
         // Create settings table
         conn.execute(
             "CREATE TABLE IF NOT EXISTS settings (
@@ -106,16 +106,34 @@ impl Database {
             )",
             [],
         )?;
-        
+
         // Migration: Add columns if they don't exist
         // Note: rusqlite doesn't support easy "ADD COLUMN IF NOT EXISTS" in one go for SQLite < 3.35 in all contexts,
         // but we can just try to add them and ignore errors, or check pragma.
         // For simplicity in this app, checking PRAGMA is safer to avoid errors in logs.
-        
-        let (has_hls_list_size, has_width, has_height, has_hw_accel, has_preset, has_mic, has_audio_br, has_audio_buf, has_audio_off, has_audio_dev, has_mic_dev, has_global_preset, has_global_vol, has_global_filters, has_global_mic_preset, has_global_mic_vol, has_global_mic_filters) = {
+
+        let (
+            has_hls_list_size,
+            has_width,
+            has_height,
+            has_hw_accel,
+            has_preset,
+            has_mic,
+            has_audio_br,
+            has_audio_buf,
+            has_audio_off,
+            has_audio_dev,
+            has_mic_dev,
+            has_global_preset,
+            has_global_vol,
+            has_global_filters,
+            has_global_mic_preset,
+            has_global_mic_vol,
+            has_global_mic_filters,
+        ) = {
             let mut stmt = conn.prepare("PRAGMA table_info(settings)")?;
             let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
-            
+
             let mut has_hls_list_size = false;
             let mut has_width = false;
             let mut has_height = false;
@@ -136,54 +154,133 @@ impl Database {
 
             for name_result in rows {
                 if let Ok(name) = name_result {
-                    if name == "hls_list_size" { has_hls_list_size = true; }
-                    if name == "width" { has_width = true; }
-                    if name == "height" { has_height = true; }
-                    if name == "enable_hw_accel" { has_hw_accel = true; }
-                    if name == "ffmpeg_preset" { has_preset = true; }
-                    if name == "enable_microphone" { has_mic = true; }
-                    if name == "audio_bitrate" { has_audio_br = true; }
-                    if name == "audio_buffer_size" { has_audio_buf = true; }
-                    if name == "audio_offset" { has_audio_off = true; }
-                    if name == "audio_device" { has_audio_dev = true; }
-                    if name == "microphone_device" { has_mic_dev = true; }
-                    if name == "global_audio_preset" { has_global_preset = true; }
-                    if name == "global_audio_volume" { has_global_vol = true; }
-                    if name == "global_audio_custom_filters" { has_global_filters = true; }
-                    if name == "global_microphone_preset" { has_global_mic_preset = true; }
-                    if name == "global_microphone_volume" { has_global_mic_vol = true; }
-                    if name == "global_microphone_custom_filters" { has_global_mic_filters = true; }
+                    if name == "hls_list_size" {
+                        has_hls_list_size = true;
+                    }
+                    if name == "width" {
+                        has_width = true;
+                    }
+                    if name == "height" {
+                        has_height = true;
+                    }
+                    if name == "enable_hw_accel" {
+                        has_hw_accel = true;
+                    }
+                    if name == "ffmpeg_preset" {
+                        has_preset = true;
+                    }
+                    if name == "enable_microphone" {
+                        has_mic = true;
+                    }
+                    if name == "audio_bitrate" {
+                        has_audio_br = true;
+                    }
+                    if name == "audio_buffer_size" {
+                        has_audio_buf = true;
+                    }
+                    if name == "audio_offset" {
+                        has_audio_off = true;
+                    }
+                    if name == "audio_device" {
+                        has_audio_dev = true;
+                    }
+                    if name == "microphone_device" {
+                        has_mic_dev = true;
+                    }
+                    if name == "global_audio_preset" {
+                        has_global_preset = true;
+                    }
+                    if name == "global_audio_volume" {
+                        has_global_vol = true;
+                    }
+                    if name == "global_audio_custom_filters" {
+                        has_global_filters = true;
+                    }
+                    if name == "global_microphone_preset" {
+                        has_global_mic_preset = true;
+                    }
+                    if name == "global_microphone_volume" {
+                        has_global_mic_vol = true;
+                    }
+                    if name == "global_microphone_custom_filters" {
+                        has_global_mic_filters = true;
+                    }
                 }
             }
-            (has_hls_list_size, has_width, has_height, has_hw_accel, has_preset, has_mic, has_audio_br, has_audio_buf, has_audio_off, has_audio_dev, has_mic_dev, has_global_preset, has_global_vol, has_global_filters, has_global_mic_preset, has_global_mic_vol, has_global_mic_filters)
+            (
+                has_hls_list_size,
+                has_width,
+                has_height,
+                has_hw_accel,
+                has_preset,
+                has_mic,
+                has_audio_br,
+                has_audio_buf,
+                has_audio_off,
+                has_audio_dev,
+                has_mic_dev,
+                has_global_preset,
+                has_global_vol,
+                has_global_filters,
+                has_global_mic_preset,
+                has_global_mic_vol,
+                has_global_mic_filters,
+            )
         };
 
         if !has_hls_list_size {
-            let _ = conn.execute("ALTER TABLE settings ADD COLUMN hls_list_size INTEGER NOT NULL DEFAULT 5", []);
+            let _ = conn.execute(
+                "ALTER TABLE settings ADD COLUMN hls_list_size INTEGER NOT NULL DEFAULT 5",
+                [],
+            );
         }
         if !has_width {
-            let _ = conn.execute("ALTER TABLE settings ADD COLUMN width INTEGER NOT NULL DEFAULT 1280", []);
+            let _ = conn.execute(
+                "ALTER TABLE settings ADD COLUMN width INTEGER NOT NULL DEFAULT 1280",
+                [],
+            );
         }
         if !has_height {
-            let _ = conn.execute("ALTER TABLE settings ADD COLUMN height INTEGER NOT NULL DEFAULT 720", []);
+            let _ = conn.execute(
+                "ALTER TABLE settings ADD COLUMN height INTEGER NOT NULL DEFAULT 720",
+                [],
+            );
         }
         if !has_hw_accel {
-            let _ = conn.execute("ALTER TABLE settings ADD COLUMN enable_hw_accel BOOLEAN NOT NULL DEFAULT 1", []);
+            let _ = conn.execute(
+                "ALTER TABLE settings ADD COLUMN enable_hw_accel BOOLEAN NOT NULL DEFAULT 1",
+                [],
+            );
         }
         if !has_preset {
-            let _ = conn.execute("ALTER TABLE settings ADD COLUMN ffmpeg_preset TEXT NOT NULL DEFAULT 'ultrafast'", []);
+            let _ = conn.execute(
+                "ALTER TABLE settings ADD COLUMN ffmpeg_preset TEXT NOT NULL DEFAULT 'ultrafast'",
+                [],
+            );
         }
         if !has_mic {
-            let _ = conn.execute("ALTER TABLE settings ADD COLUMN enable_microphone BOOLEAN NOT NULL DEFAULT 0", []);
+            let _ = conn.execute(
+                "ALTER TABLE settings ADD COLUMN enable_microphone BOOLEAN NOT NULL DEFAULT 0",
+                [],
+            );
         }
         if !has_audio_br {
-            let _ = conn.execute("ALTER TABLE settings ADD COLUMN audio_bitrate INTEGER NOT NULL DEFAULT 128", []);
+            let _ = conn.execute(
+                "ALTER TABLE settings ADD COLUMN audio_bitrate INTEGER NOT NULL DEFAULT 128",
+                [],
+            );
         }
         if !has_audio_buf {
-            let _ = conn.execute("ALTER TABLE settings ADD COLUMN audio_buffer_size INTEGER NOT NULL DEFAULT 50", []);
+            let _ = conn.execute(
+                "ALTER TABLE settings ADD COLUMN audio_buffer_size INTEGER NOT NULL DEFAULT 50",
+                [],
+            );
         }
         if !has_audio_off {
-            let _ = conn.execute("ALTER TABLE settings ADD COLUMN audio_offset INTEGER NOT NULL DEFAULT 0", []);
+            let _ = conn.execute(
+                "ALTER TABLE settings ADD COLUMN audio_offset INTEGER NOT NULL DEFAULT 0",
+                [],
+            );
         }
         if !has_audio_dev {
             let _ = conn.execute("ALTER TABLE settings ADD COLUMN audio_device TEXT NOT NULL DEFAULT 'virtual-audio-capturer'", []);
@@ -192,13 +289,22 @@ impl Database {
             let _ = conn.execute("ALTER TABLE settings ADD COLUMN microphone_device TEXT NOT NULL DEFAULT 'virtual-audio-capturer'", []);
         }
         if !has_global_preset {
-            let _ = conn.execute("ALTER TABLE settings ADD COLUMN global_audio_preset TEXT NOT NULL DEFAULT 'none'", []);
+            let _ = conn.execute(
+                "ALTER TABLE settings ADD COLUMN global_audio_preset TEXT NOT NULL DEFAULT 'none'",
+                [],
+            );
         }
         if !has_global_vol {
-            let _ = conn.execute("ALTER TABLE settings ADD COLUMN global_audio_volume REAL NOT NULL DEFAULT 0.7", []);
+            let _ = conn.execute(
+                "ALTER TABLE settings ADD COLUMN global_audio_volume REAL NOT NULL DEFAULT 0.7",
+                [],
+            );
         }
         if !has_global_filters {
-            let _ = conn.execute("ALTER TABLE settings ADD COLUMN global_audio_custom_filters TEXT", []);
+            let _ = conn.execute(
+                "ALTER TABLE settings ADD COLUMN global_audio_custom_filters TEXT",
+                [],
+            );
         }
         if !has_global_mic_preset {
             let _ = conn.execute("ALTER TABLE settings ADD COLUMN global_microphone_preset TEXT NOT NULL DEFAULT 'balanced'", []);
@@ -207,7 +313,10 @@ impl Database {
             let _ = conn.execute("ALTER TABLE settings ADD COLUMN global_microphone_volume REAL NOT NULL DEFAULT 1.0", []);
         }
         if !has_global_mic_filters {
-            let _ = conn.execute("ALTER TABLE settings ADD COLUMN global_microphone_custom_filters TEXT", []);
+            let _ = conn.execute(
+                "ALTER TABLE settings ADD COLUMN global_microphone_custom_filters TEXT",
+                [],
+            );
         }
 
         // Ensure default settings exist
@@ -242,15 +351,22 @@ impl Database {
             let mut has_source_url = false;
             for name_result in rows {
                 if let Ok(name) = name_result {
-                    if name == "source_type" { has_source_type = true; }
-                    if name == "source_url" { has_source_url = true; }
+                    if name == "source_type" {
+                        has_source_type = true;
+                    }
+                    if name == "source_url" {
+                        has_source_url = true;
+                    }
                 }
             }
             (has_source_type, has_source_url)
         };
 
         if !has_source_type {
-            let _ = conn.execute("ALTER TABLE streams ADD COLUMN source_type TEXT NOT NULL DEFAULT 'window'", []);
+            let _ = conn.execute(
+                "ALTER TABLE streams ADD COLUMN source_type TEXT NOT NULL DEFAULT 'window'",
+                [],
+            );
         }
         if !has_source_url {
             let _ = conn.execute("ALTER TABLE streams ADD COLUMN source_url TEXT", []);
@@ -282,13 +398,13 @@ impl Database {
                     audio_bitrate: row.get(7).unwrap_or(128),
                     audio_buffer_size: row.get(8).unwrap_or(50),
                     audio_offset: row.get(9).unwrap_or(0),
-                    audio_device: row.get(10).unwrap_or("virtual-audio-capturer".to_string()),
+                    audio_device: row.get(10).unwrap_or("".to_string()),
                     hls_list_size: row.get(11).unwrap_or(5),
                     width: row.get(12).unwrap_or(1280),
                     height: row.get(13).unwrap_or(720),
                     enable_hw_accel: row.get(14).unwrap_or(true),
                     ffmpeg_preset: row.get(15).unwrap_or("ultrafast".to_string()),
-                    microphone_device: row.get(16).unwrap_or("virtual-audio-capturer".to_string()),
+                    microphone_device: row.get(16).unwrap_or("".to_string()),
                     global_audio_preset: row.get(17).unwrap_or("none".to_string()),
                     global_audio_volume: row.get(18).unwrap_or(0.7),
                     global_audio_custom_filters: row.get(19).ok(),
@@ -354,7 +470,7 @@ impl Database {
     pub fn get_all_streams(&self) -> Result<Vec<DbStream>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare("SELECT id, title, status, hls_path, created_at, source_type, source_url FROM streams ORDER BY created_at DESC")?;
-        
+
         let streams = stmt.query_map([], |row| {
             Ok(DbStream {
                 id: row.get(0)?,
@@ -362,7 +478,9 @@ impl Database {
                 status: row.get(2)?,
                 hls_path: row.get(3)?,
                 created_at: row.get(4)?,
-                source_type: row.get::<_, Option<String>>(5)?.unwrap_or("window".to_string()),
+                source_type: row
+                    .get::<_, Option<String>>(5)?
+                    .unwrap_or("window".to_string()),
                 source_url: row.get(6)?,
             })
         })?;
@@ -373,18 +491,21 @@ impl Database {
         }
         Ok(result)
     }
-    
+
     pub fn remove_stream(&self, id: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute("DELETE FROM streams WHERE id = ?1", params![id])?;
         // Also remove stream audio config if exists
-        let _ = conn.execute("DELETE FROM stream_audio_config WHERE stream_id = ?1", params![id]);
+        let _ = conn.execute(
+            "DELETE FROM stream_audio_config WHERE stream_id = ?1",
+            params![id],
+        );
         Ok(())
     }
 }
 
 // Stream Audio Configuration structures (moved from stream_config.rs)
-use crate::stream_config::{StreamAudioConfig, AudioEffects, MicrophoneEffects};
+use crate::stream_config::{AudioEffects, MicrophoneEffects, StreamAudioConfig};
 
 impl Database {
     /// Initialize stream audio config table (called during init)
@@ -410,7 +531,7 @@ impl Database {
         )?;
         Ok(())
     }
-    
+
     /// Get stream-specific audio configuration
     pub fn get_stream_audio_config(&self, stream_id: &str) -> Result<Option<StreamAudioConfig>> {
         let conn = self.conn.lock().unwrap();
@@ -448,13 +569,13 @@ impl Database {
             Err(e) => Err(e),
         }
     }
-    
+
     /// Save or update stream audio configuration
     pub fn save_stream_audio_config(&self, config: &StreamAudioConfig) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         let audio_preset_str = format!("{:?}", config.audio_effects.preset).to_lowercase();
         let mic_preset_str = format!("{:?}", config.microphone_effects.preset).to_lowercase();
-        
+
         conn.execute(
             "INSERT OR REPLACE INTO stream_audio_config 
              (stream_id, audio_mode, target_pid, target_process_name, enable_microphone, microphone_device,
@@ -480,38 +601,47 @@ impl Database {
         )?;
         Ok(())
     }
-    
+
     /// Delete stream audio configuration
     pub fn delete_stream_audio_config(&self, stream_id: &str) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        conn.execute("DELETE FROM stream_audio_config WHERE stream_id = ?1", params![stream_id])?;
+        conn.execute(
+            "DELETE FROM stream_audio_config WHERE stream_id = ?1",
+            params![stream_id],
+        )?;
         Ok(())
     }
-    
+
     /// Create default audio config from global settings
     pub fn create_default_audio_config_from_global(&self, stream_id: &str) -> StreamAudioConfig {
         let settings = self.get_settings().unwrap_or_default();
-        
+
         StreamAudioConfig {
             stream_id: stream_id.to_string(),
-            audio_mode: if settings.enable_audio { "system" } else { "muted" }.to_string(),
+            audio_mode: if settings.enable_audio {
+                "system"
+            } else {
+                "muted"
+            }
+            .to_string(),
             target_pid: None,
             target_process_name: None,
             enable_microphone: settings.enable_microphone,
             microphone_device: settings.microphone_device,
             audio_effects: AudioEffects {
                 enabled: settings.global_audio_preset != "none",
-                preset: serde_json::from_str(&format!("\"{}\"", settings.global_audio_preset)).unwrap_or_default(),
+                preset: serde_json::from_str(&format!("\"{}\"", settings.global_audio_preset))
+                    .unwrap_or_default(),
                 custom_filters: settings.global_audio_custom_filters,
                 master_volume: settings.global_audio_volume,
             },
             microphone_effects: MicrophoneEffects {
                 enabled: settings.global_microphone_preset != "none",
-                preset: serde_json::from_str(&format!("\"{}\"", settings.global_microphone_preset)).unwrap_or_default(),
+                preset: serde_json::from_str(&format!("\"{}\"", settings.global_microphone_preset))
+                    .unwrap_or_default(),
                 custom_filters: settings.global_microphone_custom_filters,
                 volume: settings.global_microphone_volume,
             },
         }
     }
 }
-

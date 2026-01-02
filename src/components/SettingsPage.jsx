@@ -7,6 +7,7 @@ import { Select } from '@/components/ui/select';
 import { fetchSettings, updateSettings, getStatus, stopStream, startStream } from '@/api/streams';
 import { Save, RefreshCcw, Video, Server, Clock, Loader2, Volume2, Mic, Settings2, Cpu } from 'lucide-react';
 import { motion } from 'framer-motion';
+import { AudioDeviceSelector } from './AudioDeviceSelector';
 
 export default function SettingsPage() {
     const [settings, setSettings] = useState(null);
@@ -32,23 +33,23 @@ export default function SettingsPage() {
             // Verificar se há transmissão ativa
             const status = await getStatus();
             const activeStream = status.streams?.find(s => s.status === 'running');
-            
+
             // Salvar configurações
             await updateSettings(settings);
-            
+
             // Se houver transmissão ativa, reiniciar para aplicar mudanças
             if (activeStream) {
                 setMessage({ type: 'info', text: 'Reiniciando transmissão para aplicar mudanças...' });
-                
+
                 // Parar transmissão
                 await stopStream(activeStream.id);
-                
+
                 // Aguardar 1 segundo para garantir que parou
                 await new Promise(resolve => setTimeout(resolve, 1000));
-                
+
                 // Reiniciar transmissão
                 await startStream(activeStream.id, activeStream.title);
-                
+
                 setMessage({ type: 'success', text: 'Configurações aplicadas e transmissão reiniciada!' });
             } else {
                 setMessage({ type: 'success', text: 'Configurações salvas com sucesso!' });
@@ -294,6 +295,19 @@ export default function SettingsPage() {
                                 max="1000"
                             />
                         </div>
+
+                        {/* Seletor de Dispositivo de Áudio */}
+                        <div className="p-4 rounded-xl bg-slate-950/20 border border-slate-800/50 space-y-3">
+                            <div className="space-y-1">
+                                <span className="text-sm font-medium text-slate-300 block">Dispositivo de Captura</span>
+                                <span className="text-xs text-slate-500 block">Selecione o dispositivo de loopback (Stereo Mix).</span>
+                            </div>
+                            <AudioDeviceSelector
+                                settings={settings}
+                                onUpdate={(updatedSettings) => setSettings(updatedSettings)}
+                                deviceType="loopback"
+                            />
+                        </div>
                     </CardContent>
                 </Card>
 
@@ -401,10 +415,17 @@ export default function SettingsPage() {
                             </div>
                         </div>
 
-                        <div className="p-3 rounded-lg bg-slate-950/30 border border-slate-800/30">
-                            <p className="text-xs text-slate-400 leading-relaxed">
-                                💡 <strong>Dica:</strong> O microfone padrão do Windows será capturado automaticamente. Configure em Configurações do Windows → Som → Entrada.
-                            </p>
+                        {/* Seletor de Dispositivo de Microfone */}
+                        <div className="p-4 rounded-xl bg-slate-950/20 border border-slate-800/50 space-y-3">
+                            <div className="space-y-1">
+                                <span className="text-sm font-medium text-slate-300 block">Dispositivo de Microfone</span>
+                                <span className="text-xs text-slate-500 block">Selecione o microfone a ser capturado.</span>
+                            </div>
+                            <AudioDeviceSelector
+                                settings={settings}
+                                onUpdate={(updatedSettings) => setSettings(updatedSettings)}
+                                deviceType="input"
+                            />
                         </div>
                     </CardContent>
                 </Card>
@@ -450,3 +471,4 @@ export default function SettingsPage() {
         </motion.div >
     );
 }
+
