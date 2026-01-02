@@ -71,6 +71,25 @@ pub fn run() {
         .setup(move |app| {
             let _app_handle = app.handle().clone();
 
+            // === System Tray Setup ===
+            use tauri::tray::TrayIconBuilder;
+
+            let _tray = TrayIconBuilder::with_id("tray")
+                .icon(app.default_window_icon().unwrap().clone())
+                .on_tray_icon_event(|tray, _event| {
+                    // Clique no tray restaura todas as janelas
+                    let app = tray.app_handle();
+                    for (_, window) in app.webview_windows() {
+                        let _ = window.show();
+                        let _ = window.set_skip_taskbar(false);
+                        let _ = window.unminimize();
+                        let _ = window.set_focus();
+                    }
+                })
+                .build(app)?;
+            // =========================
+            // =========================
+
             // Ensure directory exists
             std::fs::create_dir_all(&streams_path).ok();
             let streams_dir_str = streams_path.to_string_lossy().into_owned();
@@ -90,6 +109,21 @@ pub fn run() {
             });
 
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            match event {
+                // Implementando "Fechar para Bandeja"
+                // Como não conseguimos interceptar 'Minimized' facilmente na v2,
+                // interceptamos o 'Close' para manter o app rodando.
+                tauri::WindowEvent::CloseRequested { api, .. } => {
+                    // Impede o fechamento real
+                    api.prevent_close();
+                    // Esconde a janela e remove da barra de tarefas
+                    let _ = window.hide();
+                    let _ = window.set_skip_taskbar(true);
+                }
+                _ => {}
+            }
         })
         .invoke_handler(tauri::generate_handler![
             get_capture_sources,
