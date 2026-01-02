@@ -3,6 +3,7 @@ mod commands;
 mod db;
 mod encoder;
 mod ffmpeg;
+mod logger;
 mod output;
 mod server;
 mod state;
@@ -19,6 +20,11 @@ pub use db::DbSettings as AppSettings;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    if let Err(e) = logger::init_logger() {
+        // Fallback to stderr if logger fails
+        eprintln!("Failed to initialize logger: {}", e);
+    }
+
     // Determine executable directory
     let exe_path = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("."));
     let is_dev_env = exe_path.to_string_lossy().contains("target");
@@ -40,13 +46,12 @@ pub fn run() {
             .to_path_buf()
     };
 
-    println!("📂 Executável em: {}", exe_path.display());
-    println!("📂 Diretório de dados: {}", db_dir.display());
+    tracing::info!("📂 Executável em: {}", exe_path.display());
+    tracing::info!("📂 Diretório de dados: {}", db_dir.display());
 
     // Initialize database in the same location as executable (contains all tables now)
     let db_path = db_dir.join("hipocast.db");
-    println!("🗄️ Banco de dados: {}", db_path.display());
-
+    tracing::info!("🗄️ Banco de dados: {}", db_path.display());
     let db = Database::init(&db_path).expect("Failed to init database");
     let db = Arc::new(db);
 
@@ -70,7 +75,7 @@ pub fn run() {
             std::fs::create_dir_all(&streams_path).ok();
             let streams_dir_str = streams_path.to_string_lossy().into_owned();
 
-            println!("✅ Global Stream Path: {}", streams_dir_str);
+            tracing::info!("✅ Global Stream Path: {}", streams_dir_str);
 
             // Fetch settings for port
             let state = app.state::<AppState>();

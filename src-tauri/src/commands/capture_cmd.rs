@@ -17,7 +17,7 @@ pub async fn start_browser_stream(
         .clone()
         .unwrap_or_else(|| format!("browser_{}", uuid::Uuid::new_v4()));
 
-    println!(
+    tracing::info!(
         "🔍 Verificando janela existente para stream_id: '{}'",
         stream_id
     );
@@ -29,17 +29,18 @@ pub async fn start_browser_stream(
             // Tentar obter HWND da janela existente
             if let Ok(hwnd) = existing_window.hwnd() {
                 let hwnd_id = format!("window:{}", hwnd.0 as usize);
-                println!(
+                tracing::info!(
                     "♻️ Reutilizando janela existente para stream '{}' (HWND: {})",
-                    stream_id, hwnd.0 as usize
+                    stream_id,
+                    hwnd.0 as usize
                 );
                 Some(hwnd_id)
             } else {
-                println!("⚠️ Janela existe mas HWND inválido, será criada nova janela");
+                tracing::warn!("⚠️ Janela existe mas HWND inválido, será criada nova janela");
                 None
             }
         } else {
-            println!(
+            tracing::info!(
                 "🆕 Nenhuma janela existente para '{}', criando nova",
                 stream_id
             );
@@ -59,9 +60,10 @@ pub async fn start_browser_stream(
         let win_width = settings.width as f64;
         let win_height = settings.height as f64;
 
-        println!(
+        tracing::info!(
             "📏 Creating browser window: {}x{}",
-            settings.width, settings.height
+            settings.width,
+            settings.height
         );
 
         let window =
@@ -79,14 +81,14 @@ pub async fn start_browser_stream(
         }
 
         // Aguardar carregamento (opcional, pode ajustar conforme necessidade)
-        println!("⏳ Waiting for window creation...");
+        tracing::debug!("⏳ Waiting for window creation...");
         std::thread::sleep(std::time::Duration::from_millis(1000)); // Pequeno delay para garantir HWND
 
         let hwnd = window
             .hwnd()
             .map_err(|e| format!("Failed to get window HWND: {}", e))?;
 
-        println!("✅ Browser window created. HWND: {:?}", hwnd);
+        tracing::info!("✅ Browser window created. HWND: {:?}", hwnd);
 
         format!("window:{}", hwnd.0 as usize)
     };
@@ -171,7 +173,7 @@ fn start_source_capture_internal(
             };
 
             if let Err(e) = state.db.add_stream(&stream) {
-                eprintln!("Failed to add stream to DB: {}", e);
+                tracing::error!("Failed to add stream to DB: {}", e);
             }
 
             // Criar configuração de áudio padrão baseada nas configurações globais apenas se não existir
@@ -184,7 +186,7 @@ fn start_source_capture_internal(
             {
                 let default_audio_config = state.db.create_default_audio_config_from_global(&id);
                 if let Err(e) = state.db.save_stream_audio_config(&default_audio_config) {
-                    eprintln!("Failed to save default audio config: {}", e);
+                    tracing::error!("Failed to save default audio config: {}", e);
                 }
             }
 
@@ -250,7 +252,7 @@ fn start_source_capture_browser(
             };
 
             if let Err(e) = state.db.add_stream(&stream) {
-                eprintln!("Failed to add stream to DB: {}", e);
+                tracing::error!("Failed to add stream to DB: {}", e);
             }
 
             // Criar configuração de áudio padrão baseada nas configurações globais apenas se não existir
@@ -264,7 +266,7 @@ fn start_source_capture_browser(
                 let default_audio_config =
                     state.db.create_default_audio_config_from_global(&stream_id);
                 if let Err(e) = state.db.save_stream_audio_config(&default_audio_config) {
-                    eprintln!("Failed to save default audio config: {}", e);
+                    tracing::error!("Failed to save default audio config: {}", e);
                 }
             }
 
@@ -282,24 +284,24 @@ pub fn stop_source_capture(state: State<'_, AppState>) -> StatusResponse {
 
     if let Some(id) = active_id.as_ref() {
         if let Err(e) = state.db.update_stream_status(id, "stopped") {
-            eprintln!("Failed to update stream status: {}", e);
+            tracing::error!("Failed to update stream status: {}", e);
         }
     }
 
     // FORÇA a finalização do CaptureHandle (drop) e espera threads terminarem
     if handle.is_some() {
-        println!("🛑 Stopping capture and waiting for threads to finish...");
+        tracing::info!("🛑 Stopping capture and waiting for threads to finish...");
         let start_stop = std::time::Instant::now();
         *handle = None; // Drop CaptureHandle, fecha channel e para threads
         drop(handle); // Libera o lock
 
         // Aguarda as threads finalizarem (FFmpeg e áudio)
         // Tempo maior para garantir flush de buffers
-        println!("⏳ Waiting for FFmpeg and audio threads to finish...");
+        tracing::debug!("⏳ Waiting for FFmpeg and audio threads to finish...");
         std::thread::sleep(std::time::Duration::from_millis(2500));
 
         let elapsed = start_stop.elapsed();
-        println!(
+        tracing::info!(
             "✅ Capture stopped in {:.2}s, threads finished",
             elapsed.as_secs_f64()
         );

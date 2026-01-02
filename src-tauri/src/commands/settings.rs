@@ -9,6 +9,6 @@ pub fn get_settings(state: State<'_, AppState>) -> AppSettings {
 #[tauri::command]
 pub fn update_settings(state: State<'_, AppState>, new_settings: AppSettings) {
     if let Err(e) = state.db.update_settings(&new_settings) {
-        eprintln!("Failed to update settings: {}", e);
+        tracing::error!("Failed to update settings: {}", e);
     }
 }

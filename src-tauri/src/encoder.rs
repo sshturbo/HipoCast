@@ -97,7 +97,10 @@ pub fn detect_encoder(ffmpeg_path: &PathBuf) -> (String, Vec<String>) {
         "🕵️ Detectando Encoders de Hardware...\n   Caminho FFmpeg: {:?}\n",
         ffmpeg_path
     );
-    println!("{}", log_msg);
+    tracing::info!(
+        "🕵️ Detectando Encoders de Hardware...\n   Caminho FFmpeg: {:?}",
+        ffmpeg_path
+    );
     write_encoder_log(&log_msg);
 
     // Lista de encoders candidatos em ordem de prioridade (AMD primeiro para APUs Ryzen)
@@ -116,7 +119,11 @@ pub fn detect_encoder(ffmpeg_path: &PathBuf) -> (String, Vec<String>) {
                 "🚀 Encoder GPU Confirmado: Usando {} com preset {:?}\n",
                 codec, preset
             );
-            println!("{}", success_msg);
+            tracing::info!(
+                "🚀 Encoder GPU Confirmado: Usando {} com preset {:?}",
+                codec,
+                preset
+            );
             write_encoder_log(&success_msg);
 
             let args: Vec<String> = preset.iter().map(|p| p.to_string()).collect();
@@ -125,7 +132,7 @@ pub fn detect_encoder(ffmpeg_path: &PathBuf) -> (String, Vec<String>) {
     }
 
     let fallback_msg = "⚠️ Nenhum Encoder GPU encontrado. Usando encoding por CPU\n   Isso causará alta CPU e possíveis travamentos\n";
-    println!("{}", fallback_msg);
+    tracing::warn!("{}", fallback_msg);
     write_encoder_log(fallback_msg);
 
     (
@@ -147,7 +154,7 @@ pub fn get_encoder_config(enable_hw_accel: bool, cpu_preset: &str) -> (String, V
         let (codec, args) = get_cached_encoder();
         (codec.clone(), args.clone())
     } else {
-        println!("🛑 Aceleração de Hardware DESABILITADA pelo usuário. Usando CPU.");
+        tracing::warn!("🛑 Aceleração de Hardware DESABILITADA pelo usuário. Usando CPU.");
         (
             "libx264".to_string(),
             vec![
@@ -163,7 +170,7 @@ pub fn get_encoder_config(enable_hw_accel: bool, cpu_preset: &str) -> (String, V
 /// Testa se um encoder está disponível e funcional no sistema
 fn test_encoder(ffmpeg_path: &PathBuf, codec: &str) -> bool {
     let test_msg = format!("   📍 Testando {}...", codec);
-    println!("{}", test_msg);
+    tracing::info!("{}", test_msg);
     write_encoder_log(&test_msg);
 
     // Executa uma codificação mínima para verificar se o hardware funciona
@@ -204,7 +211,7 @@ fn test_encoder(ffmpeg_path: &PathBuf, codec: &str) -> bool {
         Ok(out) => {
             if out.status.success() {
                 let success = format!("   ✅ {} FUNCIONA! (testado em {:?})", codec, elapsed);
-                println!("{}", success);
+                tracing::info!("{}", success);
                 write_encoder_log(&success);
                 true
             } else {
@@ -214,13 +221,13 @@ fn test_encoder(ffmpeg_path: &PathBuf, codec: &str) -> bool {
                     codec,
                     out.status.code()
                 );
-                println!("{}", fail_msg);
+                tracing::warn!("{}", fail_msg);
                 write_encoder_log(&fail_msg);
 
                 if !err.is_empty() && !err.contains("deprecated") {
                     let reason =
                         format!("      Razão: {}", err.trim().lines().next().unwrap_or(""));
-                    println!("{}", reason);
+                    tracing::warn!("{}", reason);
                     write_encoder_log(&reason);
                 }
                 false
@@ -299,7 +306,7 @@ pub fn build_audio_input_args(config: &AudioConfig) -> Vec<String> {
             format!("audio={}", config.microphone_device),
         ]);
 
-        println!("🎤🔊 Mixando Áudio: Sistema + Microfone");
+        tracing::info!("🎤🔊 Mixando Áudio: Sistema + Microfone");
     } else if config.enabled {
         // CASO 2: Apenas Áudio do Sistema
         if config.offset_ms != 0 {
@@ -320,9 +327,10 @@ pub fn build_audio_input_args(config: &AudioConfig) -> Vec<String> {
             format!("audio={}", config.device),
         ]);
 
-        println!(
+        tracing::info!(
             "🔊 Apenas Áudio do Sistema: device='{}' (offset: {}ms)",
-            config.device, config.offset_ms
+            config.device,
+            config.offset_ms
         );
     } else if config.microphone_enabled {
         // CASO 3: Apenas Microfone
@@ -346,9 +354,10 @@ pub fn build_audio_input_args(config: &AudioConfig) -> Vec<String> {
             format!("audio={}", config.microphone_device),
         ]);
 
-        println!(
+        tracing::info!(
             "🎤 Apenas Microfone: device='{}' (offset: {}ms)",
-            config.microphone_device, config.offset_ms
+            config.microphone_device,
+            config.offset_ms
         );
     } else {
         // CASO 4: Sem Áudio (Fallback Silencioso)
@@ -359,7 +368,7 @@ pub fn build_audio_input_args(config: &AudioConfig) -> Vec<String> {
             "anullsrc=r=48000:cl=stereo".to_string(),
         ]);
 
-        println!("🔇 Áudio desabilitado: Usando trilha silenciosa");
+        tracing::info!("🔇 Áudio desabilitado: Usando trilha silenciosa");
     }
 
     args

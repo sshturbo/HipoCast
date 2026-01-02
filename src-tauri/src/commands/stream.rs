@@ -19,7 +19,7 @@ pub fn get_status(state: State<'_, AppState>) -> StatusResponse {
             })
             .collect(),
         Err(e) => {
-            eprintln!("Failed to fetch streams: {}", e);
+            tracing::error!("Failed to fetch streams: {}", e);
             Vec::new()
         }
     };
@@ -64,7 +64,7 @@ pub fn remove_stream(state: State<'_, AppState>, id: String) -> StatusResponse {
 
     // Remove from DB
     if let Err(e) = state.db.remove_stream(&id) {
-        eprintln!("Failed to remove stream from DB: {}", e);
+        tracing::error!("Failed to remove stream from DB: {}", e);
     }
 
     // Remove files from disk using GLOBAL path
@@ -72,9 +72,9 @@ pub fn remove_stream(state: State<'_, AppState>, id: String) -> StatusResponse {
 
     if stream_dir.exists() {
         if let Err(e) = std::fs::remove_dir_all(&stream_dir) {
-            eprintln!("Failed to remove stream directory: {}", e);
+            tracing::error!("Failed to remove stream directory: {}", e);
         } else {
-            println!("Removed stream files: {:?}", stream_dir);
+            tracing::info!("Removed stream files: {:?}", stream_dir);
         }
     }
 

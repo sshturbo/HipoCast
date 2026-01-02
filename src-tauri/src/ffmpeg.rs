@@ -131,7 +131,7 @@ impl FfmpegEncoder {
         // Filtro de áudio para stream única (não mixada)
         if let Some(af) = build_single_audio_filter(&audio_config) {
             command.args(["-af", &af]);
-            println!("🎛️ Aplicando filtros de áudio: {}", af);
+            tracing::info!("🎛️ Aplicando filtros de áudio: {}", af);
         }
 
         // ===== OUTPUT HLS =====
@@ -170,7 +170,7 @@ impl FfmpegEncoder {
 
         let process = command.spawn()?;
 
-        println!(
+        tracing::info!(
             "FFmpeg iniciado: {} ({}x{} @ {} fps) [Encoder: {}]",
             hls_config.stream_id(),
             video_config.width,
@@ -209,7 +209,7 @@ impl FfmpegEncoder {
 
     /// Parar processo FFmpeg imediatamente
     pub fn stop(&mut self) {
-        println!("🛑 Parando FFmpeg...");
+        tracing::info!("🛑 Parando FFmpeg...");
 
         // Fechar stdin para sinalizar fim do stream
         drop(self.process.stdin.take());
@@ -217,18 +217,18 @@ impl FfmpegEncoder {
         // Matar o processo imediatamente ao invés de esperar
         match self.process.kill() {
             Ok(_) => {
-                println!("✅ Processo FFmpeg terminado");
+                tracing::info!("✅ Processo FFmpeg terminado");
                 // Aguardar para garantir que recursos sejam liberados
                 let _ = self.process.wait();
             }
             Err(e) => {
-                eprintln!("⚠️ Erro ao matar processo FFmpeg: {}", e);
+                tracing::warn!("⚠️ Erro ao matar processo FFmpeg: {}", e);
                 // Tentar esperar mesmo assim
                 let _ = self.process.wait();
             }
         }
 
-        println!("✅ FFmpeg completamente parado");
+        tracing::info!("✅ FFmpeg completamente parado");
     }
 }
 

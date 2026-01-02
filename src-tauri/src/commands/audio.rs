@@ -18,7 +18,7 @@ pub fn list_audio_devices_ffmpeg(
             if let Some((timestamp, devices)) = cache.as_ref() {
                 // Return cached if less than 30 seconds old
                 if timestamp.elapsed() < std::time::Duration::from_secs(30) {
-                    println!(
+                    tracing::debug!(
                         "💾 Using cached audio devices ({}s old)",
                         timestamp.elapsed().as_secs()
                     );
@@ -28,7 +28,7 @@ pub fn list_audio_devices_ffmpeg(
         }
     }
 
-    println!("🎧 Listando dispositivos de áudio via FFmpeg DirectShow...");
+    tracing::info!("🎧 Listando dispositivos de áudio via FFmpeg DirectShow...");
 
     let ffmpeg_path = get_ffmpeg_path();
 
@@ -65,7 +65,7 @@ pub fn list_audio_devices_ffmpeg(
                     };
 
                     // Log antes de mover device_type
-                    println!(
+                    tracing::debug!(
                         "  ✓ Encontrado: {} ({})",
                         device_name,
                         if device_type == "loopback" {
@@ -84,7 +84,7 @@ pub fn list_audio_devices_ffmpeg(
         }
     }
 
-    println!("✅ Total de dispositivos encontrados: {}", devices.len());
+    tracing::info!("✅ Total de dispositivos encontrados: {}", devices.len());
 
     if devices.is_empty() {
         Err("Nenhum dispositivo de áudio encontrado".to_string())
