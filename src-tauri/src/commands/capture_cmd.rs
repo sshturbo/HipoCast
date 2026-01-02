@@ -72,6 +72,9 @@ pub async fn start_browser_stream(
                 .inner_size(win_width, win_height)
                 .visible(true)
                 .center() // Centralizar para fácil acesso do usuário
+                // Flags para tentar contornar DRM/Black Screen (Netflix)
+                // msPlayReady: Desabilita DRM PlayReady do Edge
+                .additional_browser_args("--disable-features=msPlayReady")
                 .build()
                 .map_err(|e| format!("Failed to create stream window: {}", e))?;
 
