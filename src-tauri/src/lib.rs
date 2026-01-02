@@ -1,5 +1,4 @@
 mod capture;
-mod encoder;
 mod hls;
 mod server;
 
@@ -41,6 +40,7 @@ struct AppState {
     browser_windows: Mutex<std::collections::HashMap<String, tauri::WebviewWindow>>, // Múltiplas janelas por stream_id
     db: Arc<Database>,
     streams_path: std::path::PathBuf,
+    audio_devices_cache: Mutex<Option<(std::time::Instant, Vec<AudioDeviceInfo>)>>,
 }
 
 #[tauri::command]
@@ -476,8 +476,28 @@ struct AudioDeviceInfo {
 
 // Implementação real: lista dispositivos de áudio via FFmpeg DirectShow
 #[tauri::command]
-fn list_audio_devices_ffmpeg() -> Result<Vec<AudioDeviceInfo>, String> {
+fn list_audio_devices_ffmpeg(
+    state: State<'_, AppState>,
+    force_refresh: bool,
+) -> Result<Vec<AudioDeviceInfo>, String> {
     use std::process::Command;
+
+    // Check cache
+    {
+        let cache = state.audio_devices_cache.lock().unwrap();
+        if !force_refresh {
+            if let Some((timestamp, devices)) = cache.as_ref() {
+                // Return cached if less than 30 seconds old
+                if timestamp.elapsed() < std::time::Duration::from_secs(30) {
+                    println!(
+                        "💾 Using cached audio devices ({}s old)",
+                        timestamp.elapsed().as_secs()
+                    );
+                    return Ok(devices.clone());
+                }
+            }
+        }
+    }
 
     println!("🎧 Listando dispositivos de áudio via FFmpeg DirectShow...");
 
@@ -545,6 +565,11 @@ fn list_audio_devices_ffmpeg() -> Result<Vec<AudioDeviceInfo>, String> {
     if devices.is_empty() {
         Err("Nenhum dispositivo de áudio encontrado".to_string())
     } else {
+        // Update cache
+        {
+            let mut cache = state.audio_devices_cache.lock().unwrap();
+            *cache = Some((std::time::Instant::now(), devices.clone()));
+        }
         Ok(devices)
     }
 }
@@ -662,6 +687,7 @@ pub fn run() {
             browser_windows: Mutex::new(std::collections::HashMap::new()),
             db,
             streams_path: streams_path.clone(),
+            audio_devices_cache: Mutex::new(None),
         })
         .setup(move |app| {
             let _app_handle = app.handle().clone();

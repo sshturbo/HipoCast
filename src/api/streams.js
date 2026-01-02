@@ -115,9 +115,9 @@ export async function updateSettings(settings) {
  * Lista dispositivos de áudio via FFmpeg DirectShow
  * Retorna: [{ name: string, deviceType: "loopback" | "input" }]
  */
-export async function listAudioDevices() {
+export async function listAudioDevices(forceRefresh = false) {
     try {
-        return await invoke('list_audio_devices_ffmpeg');
+        return await invoke('list_audio_devices_ffmpeg', { forceRefresh });
     } catch (error) {
         console.error('Erro ao listar dispositivos de áudio:', error);
         return [];

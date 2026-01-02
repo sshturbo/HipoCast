@@ -16,11 +16,12 @@ export function AudioDeviceSelector({ settings, onUpdate, deviceType }) {
         loadDevices();
     }, []);
 
-    const loadDevices = async () => {
+    const loadDevices = async (force = false) => {
         setLoading(true);
         setError(null);
         try {
-            const deviceList = await listAudioDevices();
+            const isForce = typeof force === 'boolean' ? force : false;
+            const deviceList = await listAudioDevices(isForce);
             setDevices(deviceList);
             console.log('📱 Dispositivos carregados:', deviceList);
         } catch (err) {
@@ -56,7 +57,7 @@ export function AudioDeviceSelector({ settings, onUpdate, deviceType }) {
                                 🔊 Dispositivo de Loopback
                             </label>
                             <button
-                                onClick={loadDevices}
+                                onClick={() => loadDevices(true)}
                                 disabled={loading}
                                 className="btn-refresh-small"
                             >
@@ -94,7 +95,7 @@ export function AudioDeviceSelector({ settings, onUpdate, deviceType }) {
                                 🎤 Dispositivo de Entrada
                             </label>
                             <button
-                                onClick={loadDevices}
+                                onClick={() => loadDevices(true)}
                                 disabled={loading}
                                 className="btn-refresh-small"
                             >

@@ -1,5 +1,7 @@
 use crate::db::Database;
+use fast_image_resize::{images::Image, PixelType, ResizeAlg, ResizeOptions, Resizer};
 use serde::{Deserialize, Serialize};
+use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicBool, Ordering};
 use windows_capture::{
     capture::{CaptureControl, Context, GraphicsCaptureApiHandler},
@@ -288,25 +290,36 @@ pub fn start_capture(
                 } = frame;
 
                 if width != canvas_width || height != canvas_height {
-                    // Real-time scaling using 'image' crate
-                    use image::{imageops::FilterType, ImageBuffer, Rgba};
+                    // Optimized scaling using fast_image_resize
+                    let src_width = NonZeroU32::new(width).unwrap();
+                    let src_height = NonZeroU32::new(height).unwrap();
+                    let dst_width = NonZeroU32::new(canvas_width).unwrap();
+                    let dst_height = NonZeroU32::new(canvas_height).unwrap();
 
-                    if let Some(img) =
-                        ImageBuffer::<Rgba<u8>, Vec<u8>>::from_raw(width, height, data)
-                    {
-                        // Quick Nearest scaling for maximum performance (low CPU overhead)
-                        let scaled = image::imageops::resize(
-                            &img,
-                            canvas_width,
-                            canvas_height,
-                            FilterType::Nearest,
-                        );
-                        last_valid_frame = Some(FrameData {
-                            data: scaled.into_raw(),
-                            width: canvas_width,
-                            height: canvas_height,
-                        });
+                    let src_image = Image::from_vec_u8(
+                        src_width.get(),
+                        src_height.get(),
+                        data,
+                        PixelType::U8x4,
+                    )
+                    .unwrap();
+
+                    let mut dst_image =
+                        Image::new(dst_width.get(), dst_height.get(), PixelType::U8x4);
+
+                    let mut resizer = Resizer::new();
+                    let options = ResizeOptions::new().resize_alg(ResizeAlg::Nearest);
+
+                    if let Err(e) = resizer.resize(&src_image, &mut dst_image, &options) {
+                        eprintln!("Resize failed: {:?}", e);
+                        continue;
                     }
+
+                    last_valid_frame = Some(FrameData {
+                        data: dst_image.into_vec(),
+                        width: canvas_width,
+                        height: canvas_height,
+                    });
                 } else {
                     last_valid_frame = Some(FrameData {
                         data,
@@ -582,27 +595,36 @@ pub fn start_capture_with_ids(
                 } = frame;
 
                 if width != canvas_width || height != canvas_height {
-                    // Real-time scaling using 'image' crate
-                    use image::{imageops::FilterType, ImageBuffer, Rgba};
+                    // Optimized scaling using fast_image_resize
+                    let src_width = NonZeroU32::new(width).unwrap();
+                    let src_height = NonZeroU32::new(height).unwrap();
+                    let dst_width = NonZeroU32::new(canvas_width).unwrap();
+                    let dst_height = NonZeroU32::new(canvas_height).unwrap();
 
-                    if let Some(img) =
-                        ImageBuffer::<Rgba<u8>, Vec<u8>>::from_raw(width, height, data)
-                    {
-                        // Quick Nearest scaling for maximum performance (low CPU overhead)
-                        let scaled = image::imageops::resize(
-                            &img,
-                            canvas_width,
-                            canvas_height,
-                            FilterType::Nearest,
-                        );
-                        last_valid_frame = Some(FrameData {
-                            data: scaled.into_raw(),
-                            width: canvas_width,
-                            height: canvas_height,
-                        });
-                    } else {
-                        eprintln!("Failed to parse image buffer for scaling");
+                    let src_image = Image::from_vec_u8(
+                        src_width.get(),
+                        src_height.get(),
+                        data,
+                        PixelType::U8x4,
+                    )
+                    .unwrap();
+
+                    let mut dst_image =
+                        Image::new(dst_width.get(), dst_height.get(), PixelType::U8x4);
+
+                    let mut resizer = Resizer::new();
+                    let options = ResizeOptions::new().resize_alg(ResizeAlg::Nearest);
+
+                    if let Err(e) = resizer.resize(&src_image, &mut dst_image, &options) {
+                        eprintln!("Resize failed: {:?}", e);
+                        continue;
                     }
+
+                    last_valid_frame = Some(FrameData {
+                        data: dst_image.into_vec(),
+                        width: canvas_width,
+                        height: canvas_height,
+                    });
                 } else {
                     last_valid_frame = Some(FrameData {
                         data,
