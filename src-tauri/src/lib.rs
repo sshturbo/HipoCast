@@ -72,18 +72,25 @@ pub fn run() {
             let _app_handle = app.handle().clone();
 
             // === System Tray Setup ===
-            use tauri::tray::TrayIconBuilder;
+            // === System Tray Setup ===
+            use tauri::tray::{MouseButton, TrayIconBuilder, TrayIconEvent};
 
             let _tray = TrayIconBuilder::with_id("tray")
                 .icon(app.default_window_icon().unwrap().clone())
-                .on_tray_icon_event(|tray, _event| {
-                    // Clique no tray restaura todas as janelas
-                    let app = tray.app_handle();
-                    for (_, window) in app.webview_windows() {
-                        let _ = window.show();
-                        let _ = window.set_skip_taskbar(false);
-                        let _ = window.unminimize();
-                        let _ = window.set_focus();
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        ..
+                    } = event
+                    {
+                        // Clique no tray restaura todas as janelas
+                        let app = tray.app_handle();
+                        for (_, window) in app.webview_windows() {
+                            let _ = window.show();
+                            let _ = window.set_skip_taskbar(false);
+                            let _ = window.unminimize();
+                            let _ = window.set_focus();
+                        }
                     }
                 })
                 .build(app)?;

@@ -273,11 +273,7 @@ pub fn build_audio_input_args(config: &AudioConfig) -> Vec<String> {
     if config.enabled && config.microphone_enabled {
         // CASO 1: Sistema + Microfone -> Mix
         // Offset aplicado se configurado
-        if config.offset_ms != 0 {
-            let offset_sec = config.offset_ms as f64 / 1000.0;
-            args.extend(["-itsoffset".to_string(), format!("{:.3}", offset_sec)]);
-        }
-
+        // CASO 1: Sistema + Microfone -> Mix
         // Input 0: Áudio do Sistema via DirectShow
         args.extend([
             "-f".to_string(),
@@ -309,10 +305,7 @@ pub fn build_audio_input_args(config: &AudioConfig) -> Vec<String> {
         tracing::info!("🎤🔊 Mixando Áudio: Sistema + Microfone");
     } else if config.enabled {
         // CASO 2: Apenas Áudio do Sistema
-        if config.offset_ms != 0 {
-            let offset_sec = config.offset_ms as f64 / 1000.0;
-            args.extend(["-itsoffset".to_string(), format!("{:.3}", offset_sec)]);
-        }
+        // CASO 2: Apenas Áudio do Sistema
 
         args.extend([
             "-f".to_string(),
@@ -334,10 +327,7 @@ pub fn build_audio_input_args(config: &AudioConfig) -> Vec<String> {
         );
     } else if config.microphone_enabled {
         // CASO 3: Apenas Microfone
-        if config.offset_ms != 0 {
-            let offset_sec = config.offset_ms as f64 / 1000.0;
-            args.extend(["-itsoffset".to_string(), format!("{:.3}", offset_sec)]);
-        }
+        // CASO 3: Apenas Microfone
 
         args.extend([
             "-f".to_string(),
@@ -377,22 +367,30 @@ pub fn build_audio_input_args(config: &AudioConfig) -> Vec<String> {
 /// Gera o filtro de mixagem de áudio para FFmpeg
 pub fn build_audio_mix_filter(config: &AudioConfig) -> Option<String> {
     if config.enabled && config.microphone_enabled {
+        let offset_sec = config.offset_ms as f64 / 1000.0;
+
         let sys_filter_str = if !config.audio_filters.is_empty() {
             format!(
-                "aresample=48000:async=1,asetpts=PTS-STARTPTS,{}",
-                config.audio_filters
+                "aresample=48000:async=1,asetpts=PTS-STARTPTS+{:.3}/TB,{}",
+                offset_sec, config.audio_filters
             )
         } else {
-            "aresample=48000:async=1,asetpts=PTS-STARTPTS".to_string()
+            format!(
+                "aresample=48000:async=1,asetpts=PTS-STARTPTS+{:.3}/TB",
+                offset_sec
+            )
         };
 
         let mic_filter_str = if !config.microphone_filters.is_empty() {
             format!(
-                "aresample=48000:async=1,asetpts=PTS-STARTPTS,{}",
-                config.microphone_filters
+                "aresample=48000:async=1,asetpts=PTS-STARTPTS+{:.3}/TB,{}",
+                offset_sec, config.microphone_filters
             )
         } else {
-            "aresample=48000:async=1,asetpts=PTS-STARTPTS".to_string()
+            format!(
+                "aresample=48000:async=1,asetpts=PTS-STARTPTS+{:.3}/TB",
+                offset_sec
+            )
         };
 
         let mix_filter = format!(
@@ -483,18 +481,23 @@ pub fn build_single_audio_filter(config: &AudioConfig) -> Option<String> {
         && !(config.enabled && config.microphone_enabled);
 
     if is_single_audio {
+        let offset_sec = config.offset_ms as f64 / 1000.0;
+
         let filters = if config.enabled && !config.audio_filters.is_empty() {
             format!(
-                "aresample=48000:async=1,asetpts=PTS-STARTPTS,{}",
-                config.audio_filters
+                "aresample=48000:async=1,asetpts=PTS-STARTPTS+{:.3}/TB,{}",
+                offset_sec, config.audio_filters
             )
         } else if config.microphone_enabled && !config.microphone_filters.is_empty() {
             format!(
-                "aresample=48000:async=1,asetpts=PTS-STARTPTS,{}",
-                config.microphone_filters
+                "aresample=48000:async=1,asetpts=PTS-STARTPTS+{:.3}/TB,{}",
+                offset_sec, config.microphone_filters
             )
         } else {
-            "aresample=48000:async=1,asetpts=PTS-STARTPTS".to_string()
+            format!(
+                "aresample=48000:async=1,asetpts=PTS-STARTPTS+{:.3}/TB",
+                offset_sec
+            )
         };
 
         Some(filters)

@@ -204,8 +204,8 @@ fn start_source_capture_internal(
 fn start_source_capture_browser(
     app: AppHandle,
     state: State<'_, AppState>,
-    stream_id: String,  // Custom ID for folders/files/database
-    capture_id: String, // Real window ID for capture
+    stream_id: String,  
+    capture_id: String, 
     title: String,
     source_type: String,
     source_url: Option<String>,
@@ -236,7 +236,7 @@ fn start_source_capture_browser(
     ) {
         Ok(control) => {
             *handle = Some(Box::new(control));
-            *active_id = Some(stream_id.clone()); // Use stream_id as active ID
+            *active_id = Some(stream_id.clone()); 
 
             // Add to DB using stream_id
             let hls_path = format!(
