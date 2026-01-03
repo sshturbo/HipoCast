@@ -196,6 +196,24 @@ export default function SettingsPage() {
                             </div>
                         </div>
 
+                        {settings.enableHwAccel && (
+                            <div className="p-4 rounded-xl bg-slate-950/20 border border-emerald-800/30 space-y-3">
+                                <div className="space-y-1">
+                                    <span className="text-sm font-medium text-emerald-300 block">Preset GPU</span>
+                                    <span className="text-xs text-slate-500 block">Equilíbrio entre velocidade e qualidade para encoder de hardware.</span>
+                                </div>
+                                <Select
+                                    value={settings.gpuPreset || "performance"}
+                                    onChange={(e) => setSettings(prev => ({ ...prev, gpuPreset: e.target.value }))}
+                                    className="bg-slate-900 border-emerald-700 w-full h-10 text-sm"
+                                >
+                                    <option value="performance">⚡ Performance (Mais rápido)</option>
+                                    <option value="balanced">⚖️ Balanced (Equilibrado)</option>
+                                    <option value="quality">🎨 Quality (Melhor qualidade)</option>
+                                </Select>
+                            </div>
+                        )}
+
                         <div className="p-4 rounded-xl bg-slate-950/20 border border-slate-800/50 space-y-3">
                             <div className="space-y-1">
                                 <span className="text-sm font-medium text-slate-300 block">Preset do Codificador (CPU)</span>

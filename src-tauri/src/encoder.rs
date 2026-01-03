@@ -148,11 +148,17 @@ pub fn detect_encoder(ffmpeg_path: &PathBuf) -> (String, Vec<String>) {
     )
 }
 
-/// Obtém configuração de encoder com override de preset para CPU
-pub fn get_encoder_config(enable_hw_accel: bool, cpu_preset: &str) -> (String, Vec<String>) {
+/// Obtém configuração de encoder com preset configurável para GPU e CPU
+pub fn get_encoder_config(
+    enable_hw_accel: bool,
+    cpu_preset: &str,
+    gpu_preset: &str,
+) -> (String, Vec<String>) {
     if enable_hw_accel {
-        let (codec, args) = get_cached_encoder();
-        (codec.clone(), args.clone())
+        let (codec, _) = get_cached_encoder();
+        let args = get_gpu_preset_args(&codec, gpu_preset);
+        tracing::info!("🎮 GPU Preset '{}' aplicado para {}", gpu_preset, codec);
+        (codec.clone(), args)
     } else {
         tracing::warn!("🛑 Aceleração de Hardware DESABILITADA pelo usuário. Usando CPU.");
         (
@@ -165,6 +171,40 @@ pub fn get_encoder_config(enable_hw_accel: bool, cpu_preset: &str) -> (String, V
             ],
         )
     }
+}
+
+/// Mapeia gpu_preset (performance/balanced/quality) para flags específicas de cada encoder
+fn get_gpu_preset_args(codec: &str, gpu_preset: &str) -> Vec<String> {
+    match codec {
+        "h264_nvenc" => {
+            // NVIDIA NVENC: P1-P7, ll (low latency), hq (high quality)
+            match gpu_preset {
+                "quality" => vec!["-preset", "p6", "-tune", "hq"],
+                "balanced" => vec!["-preset", "p4", "-tune", "ll"],
+                _ => vec!["-preset", "p1", "-tune", "ll"], // performance (default)
+            }
+        }
+        "h264_amf" => {
+            // AMD AMF: speed, balanced, quality - sempre lowlatency para streaming
+            match gpu_preset {
+                "quality" => vec!["-usage", "lowlatency", "-quality", "quality"],
+                "balanced" => vec!["-usage", "lowlatency", "-quality", "balanced"],
+                _ => vec!["-usage", "lowlatency", "-quality", "speed"], // performance
+            }
+        }
+        "h264_qsv" => {
+            // Intel QSV: veryfast, faster, fast, medium
+            match gpu_preset {
+                "quality" => vec!["-preset", "medium"],
+                "balanced" => vec!["-preset", "fast"],
+                _ => vec!["-preset", "veryfast"], // performance
+            }
+        }
+        _ => vec![], // Fallback vazio
+    }
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
 }
 
 /// Testa se um encoder está disponível e funcional no sistema
@@ -365,7 +405,7 @@ pub fn build_audio_input_args(config: &AudioConfig) -> Vec<String> {
 /// Gera o filtro de mixagem de áudio para FFmpeg
 pub fn build_audio_mix_filter(config: &AudioConfig) -> Option<String> {
     if config.enabled && config.microphone_enabled {
-        // aresample=async=1: Corrige drift automaticamente de forma imperceptível
+        // aresample=async=2: Corrige drift automaticamente
         // NÃO usar asetpts pois conflita com -use_wallclock_as_timestamps
         let resample_opts = "aresample=async=2";
 
@@ -455,7 +495,7 @@ pub fn build_audio_encoding_args(config: &AudioConfig) -> Vec<String> {
         "-b:a".to_string(),
         audio_bitrate_str,
         "-ar".to_string(),
-        "48000".to_string(),
+        "44100".to_string(), // Match input sample rate para evitar resample
         "-ac".to_string(),
         "2".to_string(), // Stereo
         "-aac_coder".to_string(),

@@ -23,6 +23,7 @@ pub struct DbSettings {
     pub height: u32,
     pub enable_hw_accel: bool,
     pub ffmpeg_preset: String,
+    pub gpu_preset: String,
     // Global Audio Effects Configuration
     pub global_audio_preset: String,
     pub global_audio_volume: f32,
@@ -53,6 +54,7 @@ impl Default for DbSettings {
             height: 720,
             enable_hw_accel: true,
             ffmpeg_preset: "ultrafast".to_string(),
+            gpu_preset: "performance".to_string(),
             global_audio_preset: "none".to_string(),
             global_audio_volume: 1.0,
             global_audio_custom_filters: None,
@@ -130,6 +132,7 @@ impl Database {
             has_global_mic_preset,
             has_global_mic_vol,
             has_global_mic_filters,
+            has_gpu_preset,
         ) = {
             let mut stmt = conn.prepare("PRAGMA table_info(settings)")?;
             let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
@@ -151,6 +154,7 @@ impl Database {
             let mut has_global_mic_preset = false;
             let mut has_global_mic_vol = false;
             let mut has_global_mic_filters = false;
+            let mut has_gpu_preset = false;
 
             for name_result in rows {
                 if let Ok(name) = name_result {
@@ -205,6 +209,9 @@ impl Database {
                     if name == "global_microphone_custom_filters" {
                         has_global_mic_filters = true;
                     }
+                    if name == "gpu_preset" {
+                        has_gpu_preset = true;
+                    }
                 }
             }
             (
@@ -225,6 +232,7 @@ impl Database {
                 has_global_mic_preset,
                 has_global_mic_vol,
                 has_global_mic_filters,
+                has_gpu_preset,
             )
         };
 
@@ -318,6 +326,12 @@ impl Database {
                 [],
             );
         }
+        if !has_gpu_preset {
+            let _ = conn.execute(
+                "ALTER TABLE settings ADD COLUMN gpu_preset TEXT NOT NULL DEFAULT 'performance'",
+                [],
+            );
+        }
 
         // Ensure default settings exist
         let count: i32 = conn.query_row("SELECT COUNT(*) FROM settings", [], |row| row.get(0))?;
@@ -384,7 +398,7 @@ impl Database {
     pub fn get_settings(&self) -> Result<DbSettings> {
         let conn = self.conn.lock().unwrap();
         conn.query_row(
-            "SELECT id, framerate, hls_time, hls_server_port, bitrate, enable_audio, enable_microphone, audio_bitrate, audio_buffer_size, audio_offset, audio_device, hls_list_size, width, height, enable_hw_accel, ffmpeg_preset, microphone_device, global_audio_preset, global_audio_volume, global_audio_custom_filters, global_microphone_preset, global_microphone_volume, global_microphone_custom_filters FROM settings LIMIT 1",
+            "SELECT id, framerate, hls_time, hls_server_port, bitrate, enable_audio, enable_microphone, audio_bitrate, audio_buffer_size, audio_offset, audio_device, hls_list_size, width, height, enable_hw_accel, ffmpeg_preset, microphone_device, global_audio_preset, global_audio_volume, global_audio_custom_filters, global_microphone_preset, global_microphone_volume, global_microphone_custom_filters, gpu_preset FROM settings LIMIT 1",
             [],
             |row| {
                 Ok(DbSettings {
@@ -411,6 +425,7 @@ impl Database {
                     global_microphone_preset: row.get(20).unwrap_or("balanced".to_string()),
                     global_microphone_volume: row.get(21).unwrap_or(1.0),
                     global_microphone_custom_filters: row.get(22).ok(),
+                    gpu_preset: row.get(23).unwrap_or("performance".to_string()),
                 })
             },
         )
@@ -419,7 +434,7 @@ impl Database {
     pub fn update_settings(&self, settings: &DbSettings) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "UPDATE settings SET framerate = ?1, hls_time = ?2, hls_server_port = ?3, bitrate = ?4, enable_audio = ?5, enable_microphone = ?6, audio_bitrate = ?7, audio_buffer_size = ?8, audio_offset = ?9, audio_device = ?10, hls_list_size = ?11, width = ?12, height = ?13, enable_hw_accel = ?14, ffmpeg_preset = ?15, microphone_device = ?16, global_audio_preset = ?17, global_audio_volume = ?18, global_audio_custom_filters = ?19, global_microphone_preset = ?20, global_microphone_volume = ?21, global_microphone_custom_filters = ?22 WHERE id = (SELECT id FROM settings LIMIT 1)",
+            "UPDATE settings SET framerate = ?1, hls_time = ?2, hls_server_port = ?3, bitrate = ?4, enable_audio = ?5, enable_microphone = ?6, audio_bitrate = ?7, audio_buffer_size = ?8, audio_offset = ?9, audio_device = ?10, hls_list_size = ?11, width = ?12, height = ?13, enable_hw_accel = ?14, ffmpeg_preset = ?15, microphone_device = ?16, global_audio_preset = ?17, global_audio_volume = ?18, global_audio_custom_filters = ?19, global_microphone_preset = ?20, global_microphone_volume = ?21, global_microphone_custom_filters = ?22, gpu_preset = ?23 WHERE id = (SELECT id FROM settings LIMIT 1)",
             params![
                 settings.framerate,
                 settings.hls_time,
@@ -443,6 +458,7 @@ impl Database {
                 settings.global_microphone_preset,
                 settings.global_microphone_volume,
                 settings.global_microphone_custom_filters,
+                settings.gpu_preset,
             ],
         )?;
         Ok(())

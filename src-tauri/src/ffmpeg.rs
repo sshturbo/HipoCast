@@ -20,7 +20,6 @@ pub struct FfmpegEncoder {
 }
 
 impl FfmpegEncoder {
-    /// Iniciar processo FFmpeg para streaming HLS
     pub fn new(
         width: u32,
         height: u32,
@@ -32,6 +31,7 @@ impl FfmpegEncoder {
         stream_id: &str,
         enable_hw_accel: bool,
         ffmpeg_preset: String,
+        gpu_preset: String,
         enable_audio: bool,
         enable_microphone: bool,
         audio_bitrate: u32,
@@ -56,7 +56,7 @@ impl FfmpegEncoder {
         };
 
         // Configuração de encoder
-        let (codec, preset_args) = get_encoder_config(enable_hw_accel, &ffmpeg_preset);
+        let (codec, preset_args) = get_encoder_config(enable_hw_accel, &ffmpeg_preset, &gpu_preset);
         let video_config = VideoEncoderConfig {
             codec,
             preset_args,
@@ -94,8 +94,6 @@ impl FfmpegEncoder {
             "1",
             "-fflags",
             "+genpts",
-            "-vsync",
-            "1",
         ]);
 
         // ===== INPUTS =====

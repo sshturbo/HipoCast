@@ -264,6 +264,7 @@ pub fn start_capture(
                         &stream_id,
                         settings_config.enable_hw_accel,
                         settings_config.ffmpeg_preset.clone(),
+                        settings_config.gpu_preset.clone(),
                         enable_audio,
                         enable_microphone,
                         settings_config.audio_bitrate,
@@ -575,6 +576,7 @@ pub fn start_capture_with_ids(
                         &stream_id_sanitized, // Use custom stream_id for folders
                         settings_config.enable_hw_accel,
                         settings_config.ffmpeg_preset.clone(),
+                        settings_config.gpu_preset.clone(),
                         enable_audio,
                         enable_microphone,
                         settings_config.audio_bitrate,
