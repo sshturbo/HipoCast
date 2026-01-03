@@ -281,7 +281,7 @@ pub fn build_audio_input_args(config: &AudioConfig) -> Vec<String> {
             "-thread_queue_size".to_string(),
             "4096".to_string(),
             "-rtbufsize".to_string(),
-            "30M".to_string(),
+            "60M".to_string(), // Aumento de buffer
             "-audio_buffer_size".to_string(),
             config.buffer_size.to_string(),
             "-i".to_string(),
@@ -295,7 +295,7 @@ pub fn build_audio_input_args(config: &AudioConfig) -> Vec<String> {
             "-thread_queue_size".to_string(),
             "4096".to_string(),
             "-rtbufsize".to_string(),
-            "30M".to_string(),
+            "60M".to_string(),
             "-audio_buffer_size".to_string(),
             config.buffer_size.to_string(),
             "-i".to_string(),
@@ -313,7 +313,7 @@ pub fn build_audio_input_args(config: &AudioConfig) -> Vec<String> {
             "-thread_queue_size".to_string(),
             "4096".to_string(),
             "-rtbufsize".to_string(),
-            "30M".to_string(),
+            "60M".to_string(),
             "-audio_buffer_size".to_string(),
             config.buffer_size.to_string(),
             "-i".to_string(),
@@ -332,8 +332,6 @@ pub fn build_audio_input_args(config: &AudioConfig) -> Vec<String> {
         args.extend([
             "-f".to_string(),
             "dshow".to_string(),
-            "-use_wallclock_as_timestamps".to_string(),
-            "1".to_string(),
             "-thread_queue_size".to_string(),
             "4096".to_string(),
             "-rtbufsize".to_string(),
@@ -369,27 +367,33 @@ pub fn build_audio_mix_filter(config: &AudioConfig) -> Option<String> {
     if config.enabled && config.microphone_enabled {
         let offset_sec = config.offset_ms as f64 / 1000.0;
 
+        // Filtro de resample com sincronização automática:
+        // async=1000: Compensa drift até 1000 samples (mais agressivo)
+        // min_hard_comp=0.01: Threshold para compensação forçada
+        // first_pts=0: Alinha início do stream
+        let resample_opts = "aresample=48000:async=1000:min_hard_comp=0.01:first_pts=0";
+
         let sys_filter_str = if !config.audio_filters.is_empty() {
             format!(
-                "aresample=48000:async=1,asetpts=PTS-STARTPTS+{:.3}/TB,{}",
-                offset_sec, config.audio_filters
+                "{},asetpts=PTS-STARTPTS+{:.3}/TB,{}",
+                resample_opts, offset_sec, config.audio_filters
             )
         } else {
             format!(
-                "aresample=48000:async=1,asetpts=PTS-STARTPTS+{:.3}/TB",
-                offset_sec
+                "{},asetpts=PTS-STARTPTS+{:.3}/TB",
+                resample_opts, offset_sec
             )
         };
 
         let mic_filter_str = if !config.microphone_filters.is_empty() {
             format!(
-                "aresample=48000:async=1,asetpts=PTS-STARTPTS+{:.3}/TB,{}",
-                offset_sec, config.microphone_filters
+                "{},asetpts=PTS-STARTPTS+{:.3}/TB,{}",
+                resample_opts, offset_sec, config.microphone_filters
             )
         } else {
             format!(
-                "aresample=48000:async=1,asetpts=PTS-STARTPTS+{:.3}/TB",
-                offset_sec
+                "{},asetpts=PTS-STARTPTS+{:.3}/TB",
+                resample_opts, offset_sec
             )
         };
 
@@ -483,20 +487,23 @@ pub fn build_single_audio_filter(config: &AudioConfig) -> Option<String> {
     if is_single_audio {
         let offset_sec = config.offset_ms as f64 / 1000.0;
 
+        // Filtro de resample com sincronização automática
+        let resample_opts = "aresample=48000:async=1000:min_hard_comp=0.01:first_pts=0";
+
         let filters = if config.enabled && !config.audio_filters.is_empty() {
             format!(
-                "aresample=48000:async=1,asetpts=PTS-STARTPTS+{:.3}/TB,{}",
-                offset_sec, config.audio_filters
+                "{},asetpts=PTS-STARTPTS+{:.3}/TB,{}",
+                resample_opts, offset_sec, config.audio_filters
             )
         } else if config.microphone_enabled && !config.microphone_filters.is_empty() {
             format!(
-                "aresample=48000:async=1,asetpts=PTS-STARTPTS+{:.3}/TB,{}",
-                offset_sec, config.microphone_filters
+                "{},asetpts=PTS-STARTPTS+{:.3}/TB,{}",
+                resample_opts, offset_sec, config.microphone_filters
             )
         } else {
             format!(
-                "aresample=48000:async=1,asetpts=PTS-STARTPTS+{:.3}/TB",
-                offset_sec
+                "{},asetpts=PTS-STARTPTS+{:.3}/TB",
+                resample_opts, offset_sec
             )
         };
 
