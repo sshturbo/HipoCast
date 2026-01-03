@@ -88,17 +88,10 @@ impl FfmpegEncoder {
         // Flags de sincronização A/V
         // -use_wallclock_as_timestamps: Usa relógio do sistema para sincronizar inputs
         // -fflags +genpts+igndts: Gera timestamps e ignora DTS inconsistentes
-        // -probesize/analyzeduration: Reduz tempo de análise inicial (startup mais rápido)
         command.args([
             "-y",
             "-fflags",
-            "+genpts+igndts+nobuffer",
-            "-flags",
-            "low_delay",
-            "-probesize",
-            "32",
-            "-analyzeduration",
-            "0",
+            "+genpts+igndts",
             "-use_wallclock_as_timestamps",
             "1",
             "-vsync",
