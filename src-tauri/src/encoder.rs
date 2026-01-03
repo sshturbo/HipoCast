@@ -319,11 +319,11 @@ pub fn build_audio_input_args(config: &AudioConfig) -> Vec<String> {
             "-f".to_string(),
             "dshow".to_string(),
             "-thread_queue_size".to_string(),
-            "4096".to_string(),
+            "8192".to_string(), // Aumentado para evitar underruns
             "-rtbufsize".to_string(),
-            "60M".to_string(), // Aumento de buffer
+            "150M".to_string(), // Buffer maior para estabilidade
             "-audio_buffer_size".to_string(),
-            config.buffer_size.to_string(),
+            "100".to_string(), // 100ms de buffer fixo
             "-i".to_string(),
             format!("audio={}", config.device),
         ]);
@@ -333,11 +333,11 @@ pub fn build_audio_input_args(config: &AudioConfig) -> Vec<String> {
             "-f".to_string(),
             "dshow".to_string(),
             "-thread_queue_size".to_string(),
-            "4096".to_string(),
+            "8192".to_string(),
             "-rtbufsize".to_string(),
-            "60M".to_string(),
+            "150M".to_string(),
             "-audio_buffer_size".to_string(),
-            config.buffer_size.to_string(),
+            "100".to_string(),
             "-i".to_string(),
             format!("audio={}", config.microphone_device),
         ]);
@@ -351,11 +351,11 @@ pub fn build_audio_input_args(config: &AudioConfig) -> Vec<String> {
             "-f".to_string(),
             "dshow".to_string(),
             "-thread_queue_size".to_string(),
-            "4096".to_string(),
+            "8192".to_string(),
             "-rtbufsize".to_string(),
-            "60M".to_string(),
+            "150M".to_string(),
             "-audio_buffer_size".to_string(),
-            config.buffer_size.to_string(),
+            "100".to_string(),
             "-i".to_string(),
             format!("audio={}", config.device),
         ]);
@@ -373,11 +373,11 @@ pub fn build_audio_input_args(config: &AudioConfig) -> Vec<String> {
             "-f".to_string(),
             "dshow".to_string(),
             "-thread_queue_size".to_string(),
-            "4096".to_string(),
+            "8192".to_string(),
             "-rtbufsize".to_string(),
             "150M".to_string(),
             "-audio_buffer_size".to_string(),
-            config.buffer_size.to_string(),
+            "100".to_string(),
             "-i".to_string(),
             format!("audio={}", config.microphone_device),
         ]);
@@ -405,20 +405,19 @@ pub fn build_audio_input_args(config: &AudioConfig) -> Vec<String> {
 /// Gera o filtro de mixagem de áudio para FFmpeg
 pub fn build_audio_mix_filter(config: &AudioConfig) -> Option<String> {
     if config.enabled && config.microphone_enabled {
-        // aresample=async=2: Corrige drift automaticamente
-        // NÃO usar asetpts pois conflita com -use_wallclock_as_timestamps
-        let resample_opts = "aresample=async=2";
+        // aresample=async=1: Corrige drift de timestamp gradual
+        let base_filter = "aresample=async=1";
 
         let sys_filter_str = if !config.audio_filters.is_empty() {
-            format!("{},{}", resample_opts, config.audio_filters)
+            format!("{},{}", base_filter, config.audio_filters)
         } else {
-            resample_opts.to_string()
+            base_filter.to_string()
         };
 
         let mic_filter_str = if !config.microphone_filters.is_empty() {
-            format!("{},{}", resample_opts, config.microphone_filters)
+            format!("{},{}", base_filter, config.microphone_filters)
         } else {
-            resample_opts.to_string()
+            base_filter.to_string()
         };
 
         let mix_filter = format!(
@@ -509,16 +508,15 @@ pub fn build_single_audio_filter(config: &AudioConfig) -> Option<String> {
         && !(config.enabled && config.microphone_enabled);
 
     if is_single_audio {
-        // aresample=async=1: Corrige drift automaticamente
-        // NÃO usar asetpts pois conflita com -use_wallclock_as_timestamps
-        let resample_opts = "aresample=async=2";
+        // aresample=async=1: Corrige drift de timestamp gradual
+        let base_filter = "aresample=async=1";
 
         let filters = if config.enabled && !config.audio_filters.is_empty() {
-            format!("{},{}", resample_opts, config.audio_filters)
+            format!("{},{}", base_filter, config.audio_filters)
         } else if config.microphone_enabled && !config.microphone_filters.is_empty() {
-            format!("{},{}", resample_opts, config.microphone_filters)
+            format!("{},{}", base_filter, config.microphone_filters)
         } else {
-            resample_opts.to_string()
+            base_filter.to_string()
         };
 
         Some(filters)
