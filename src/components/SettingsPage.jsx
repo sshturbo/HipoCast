@@ -280,21 +280,6 @@ export default function SettingsPage() {
                             />
                         </div>
 
-                        {/* Audio Offset */}
-                        <div className="p-4 rounded-xl bg-slate-950/20 border border-slate-800/50 space-y-3">
-                            <div className="space-y-1">
-                                <span className="text-sm font-medium text-slate-300 block">Offset de Áudio (ms)</span>
-                                <span className="text-xs text-slate-500 block">Ajuste de sincronização. + = atrasa áudio.</span>
-                            </div>
-                            <Input
-                                type="number"
-                                value={settings.audioOffset || 0}
-                                onChange={(e) => setSettings(prev => ({ ...prev, audioOffset: parseInt(e.target.value) || 0 }))}
-                                className="bg-slate-900 border-slate-700 w-full h-10 text-sm text-center"
-                                min="-1000"
-                                max="1000"
-                            />
-                        </div>
 
                         {/* Seletor de Dispositivo de Áudio */}
                         <div className="p-4 rounded-xl bg-slate-950/20 border border-slate-800/50 space-y-3">

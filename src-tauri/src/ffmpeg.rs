@@ -86,16 +86,16 @@ impl FfmpegEncoder {
         // Inicia comando FFmpeg
         let mut command = Command::new(&ffmpeg_path);
         // Flags de sincronização A/V
-        // -use_wallclock_as_timestamps: Usa relógio do sistema para sincronizar inputs
-        // -fflags +genpts+igndts: Gera timestamps e ignora DTS inconsistentes
+        // -use_wallclock_as_timestamps 1: Força áudio e vídeo a usarem o MESMO relógio do sistema
+        // Isso elimina o drift progressivo entre captura de tela e placa de som
         command.args([
             "-y",
-            "-fflags",
-            "+genpts+igndts",
             "-use_wallclock_as_timestamps",
             "1",
+            "-fflags",
+            "+genpts",
             "-vsync",
-            "cfr",
+            "1",
         ]);
 
         // ===== INPUTS =====
