@@ -1,4 +1,9 @@
-use axum::{http::header, response::IntoResponse, Router};
+use crate::output::is_media_path;
+use axum::{
+    http::{header, StatusCode},
+    response::IntoResponse,
+    Router,
+};
 use std::io::{BufRead, BufReader, Write};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener as StdTcpListener, TcpStream};
 use std::path::PathBuf;
@@ -23,7 +28,7 @@ pub fn start_server(port: u16, streams_path: PathBuf) -> Result<u16, String> {
             "/streams",
             ServeDir::new(streams_path).append_index_html_on_directories(false),
         )
-        .layer(axum::middleware::from_fn(add_cache_headers))
+        .layer(axum::middleware::from_fn(serve_public_hls))
         .layer(CorsLayer::permissive());
 
     tauri::async_runtime::spawn(async move {
@@ -58,10 +63,28 @@ pub fn playlist_is_served(port: u16, route: &str) -> bool {
     check().unwrap_or(false)
 }
 
-async fn add_cache_headers(
+fn is_public_hls_path(path: &str) -> bool {
+    let Some((stream, asset)) = path
+        .strip_prefix("/streams/")
+        .and_then(|suffix| suffix.split_once('/'))
+    else {
+        return false;
+    };
+    let is_public_playlist = asset.strip_suffix(".m3u8") == Some(stream);
+    !stream.is_empty()
+        && stream
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        && (is_public_playlist || is_media_path(asset, ".m4s") || is_media_path(asset, ".mp4"))
+}
+
+async fn serve_public_hls(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> impl IntoResponse {
+    if !is_public_hls_path(req.uri().path()) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
     let mut response = next.run(req).await;
     let headers = response.headers_mut();
 

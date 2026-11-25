@@ -89,8 +89,8 @@ O instalador será gerado em `src-tauri/target/release/bundle/`
 ### 2. Configurar Áudio
 
 1. Para capturar áudio do sistema, habilite essa opção em Configurações e selecione um dispositivo de loopback.
-2. Em Ajustes da transmissão, escolha se quer capturar o áudio do sistema ou transmitir em mudo.
-3. Para incluir o microfone, ative-o e selecione o dispositivo de entrada.
+2. Em Ajustes da transmissão, escolha **Todo o Sistema**, **Somente microfone** ou **Mudo**. O modo mudo desativa as duas entradas.
+3. No modo **Todo o Sistema**, use **Incluir microfone** para combinar as duas entradas. Selecione o dispositivo de entrada sempre que usar o microfone.
 4. Ajuste os efeitos e clique em "Salvar". A transmissão ativa reinicia para aplicar os ajustes.
 
 O áudio por aplicação está indisponível. Se o dispositivo selecionado estiver ausente, o vídeo pode iniciar com o áudio restante ou em silêncio. O aviso aparece no card da transmissão.
@@ -124,14 +124,16 @@ Use em players compatíveis:
 - **Bitrate**: 2500-10000 kbps
 - **Aceleração de Hardware**: NVENC, QuickSync, AMF
 
+O modo leve aplica 1280 × 720, 30 FPS e 2 Mbps com aceleração por hardware quando disponível. Em Configurações, clique em **Usar modo leve** e depois em **Salvar**. Desmarque **Prévia ao vivo** na tela de transmissão para suspender a reprodução dentro do HipoCast.
+
 ### Áudio
 - **Bitrate**: 128, 192, 256, 320 kbps
-- **Modo**: Sistema ou Mudo, com microfone opcional
+- **Modo** — Áudio do sistema com microfone opcional, somente microfone ou mudo
 - **Presets**: CleanLight, CleanBalanced, Professional, Gaming, Podcast
 
 ### HLS
 - **Duração do Segmento**: 2-6 segundos
-- **Número de Segmentos**: 3-10
+- **Segmentos na playlist** — Pelo menos 3. Digite `0` para manter todos os segmentos da transmissão em disco.
 
 ## 🏗️ Arquitetura
 

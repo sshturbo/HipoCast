@@ -80,9 +80,10 @@ export function StreamAudioModal({ streamId, streamTitle, isOpen, onClose }) {
     };
 
     const handleAudioModeChange = (mode) => {
-        setConfig(prev => ({ 
-            ...prev, 
+        setConfig(prev => ({
+            ...prev,
             audioMode: mode,
+            enableMicrophone: mode === 'microphone' || (mode === 'system' && prev.enableMicrophone),
             targetPid: null,
             targetProcessName: null
         }));
@@ -204,12 +205,12 @@ export function StreamAudioModal({ streamId, streamTitle, isOpen, onClose }) {
                     ) : (
                         <div className="space-y-6">
                         {/* Fonte de Áudio */}
-                        <div>
-                            <label className="block text-sm font-medium text-gray-300 mb-3">
-                                Fonte de Áudio do Sistema
-                            </label>
+                        <fieldset>
+                            <legend className="block text-sm font-medium text-gray-300 mb-3">Fonte de áudio</legend>
                             <div className="space-y-2">
                                 <button
+                                    type="button"
+                                    aria-pressed={config.audioMode === 'system'}
                                     onClick={() => handleAudioModeChange('system')}
                                     className={`w-full p-3 rounded-lg border transition flex items-center gap-3 ${
                                         config.audioMode === 'system' 
@@ -225,52 +226,74 @@ export function StreamAudioModal({ streamId, streamTitle, isOpen, onClose }) {
                                 </button>
 
                                 <button
-                                    onClick={() => handleAudioModeChange('muted')}
+                                    type="button"
+                                    aria-pressed={config.audioMode === 'microphone'}
+                                    onClick={() => handleAudioModeChange('microphone')}
                                     className={`w-full p-3 rounded-lg border transition flex items-center gap-3 ${
-                                        config.audioMode === 'muted' 
+                                        config.audioMode === 'microphone'
+                                            ? 'border-blue-500 bg-blue-500/10 text-white'
+                                            : 'border-gray-600 bg-gray-700/50 text-gray-300 hover:border-gray-500'
+                                    }`}
+                                >
+                                    <Mic size={20} />
+                                    <div className="text-left">
+                                        <div className="font-medium">Somente microfone</div>
+                                        <div className="text-xs text-gray-400">Captura só o microfone selecionado</div>
+                                    </div>
+                                </button>
+
+                                <button
+                                    type="button"
+                                    aria-pressed={config.audioMode === 'silent'}
+                                    onClick={() => handleAudioModeChange('silent')}
+                                    className={`w-full p-3 rounded-lg border transition flex items-center gap-3 ${
+                                        config.audioMode === 'silent'
                                             ? 'border-red-500 bg-red-500/10 text-white' 
                                             : 'border-gray-600 bg-gray-700/50 text-gray-300 hover:border-gray-500'
                                     }`}
                                 >
                                     <VolumeX size={20} />
                                     <div className="text-left">
-                                        <div className="font-medium">Sem Áudio (Mudo)</div>
-                                        <div className="text-xs text-gray-400">Não captura áudio do sistema</div>
+                                        <div className="font-medium">Mudo</div>
+                                        <div className="text-xs text-gray-400">Desativa o áudio do sistema e o microfone</div>
                                     </div>
                                 </button>
                             </div>
-                        </div>
+                        </fieldset>
 
                         <p className="text-xs text-gray-400">
                             Áudio por aplicação indisponível. A captura do sistema usa o dispositivo selecionado nas configurações.
                         </p>
 
                         {/* Microfone */}
-                        <div>
-                            <label className="block text-sm font-medium text-gray-300 mb-2">
-                                Microfone
-                            </label>
-                            <button
-                                onClick={() => setConfig(prev => ({ ...prev, enableMicrophone: !prev.enableMicrophone }))}
-                                className={`flex items-center gap-2 px-4 py-2 rounded-lg border transition ${
-                                    config.enableMicrophone 
-                                        ? 'border-green-500 bg-green-500/10 text-white' 
-                                        : 'border-gray-600 bg-gray-700/50 text-gray-300'
-                                }`}
-                            >
-                                {config.enableMicrophone ? <Mic size={18} /> : <MicOff size={18} />}
-                                <span>{config.enableMicrophone ? 'Ativado' : 'Desativado'}</span>
-                            </button>
-                            {config.enableMicrophone && (
-                                <div className="mt-2">
-                                    <AudioDeviceSelector
-                                        settings={config}
-                                        onUpdate={setConfig}
-                                        deviceType="input"
-                                    />
-                                </div>
-                            )}
-                        </div>
+                        {config.audioMode !== 'silent' && (
+                            <div>
+                                {config.audioMode === 'system' && (
+                                    <button
+                                        type="button"
+                                        aria-pressed={config.enableMicrophone}
+                                        onClick={() => setConfig(prev => ({ ...prev, enableMicrophone: !prev.enableMicrophone }))}
+                                        className={`flex items-center gap-2 px-4 py-2 rounded-lg border transition ${
+                                            config.enableMicrophone
+                                                ? 'border-green-500 bg-green-500/10 text-white'
+                                                : 'border-gray-600 bg-gray-700/50 text-gray-300'
+                                        }`}
+                                    >
+                                        {config.enableMicrophone ? <Mic size={18} /> : <MicOff size={18} />}
+                                        <span>Incluir microfone</span>
+                                    </button>
+                                )}
+                                {config.enableMicrophone && (
+                                    <div className="mt-2">
+                                        <AudioDeviceSelector
+                                            settings={config}
+                                            onUpdate={setConfig}
+                                            deviceType="input"
+                                        />
+                                    </div>
+                                )}
+                            </div>
+                        )}
 
                         {/* Divisor */}
                         <div className="border-t border-gray-700"></div>
@@ -585,7 +608,7 @@ export function StreamAudioModal({ streamId, streamTitle, isOpen, onClose }) {
                         <Button 
                             onClick={handleSave} 
                             className="flex-1 bg-blue-600 hover:bg-blue-700"
-                            disabled={saving}
+                            disabled={saving || loading || !config}
                         >
                             {saving ? 'Salvando...' : 'Salvar'}
                         </Button>

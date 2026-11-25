@@ -9,8 +9,11 @@ import { Save, RefreshCcw, Video, Server, Clock, Loader2, Volume2, Mic, Settings
 import { motion } from 'framer-motion';
 import { AudioDeviceSelector } from './AudioDeviceSelector';
 
+const MAX_HLS_LIST_SIZE = 0xffffffff;
+
 export default function SettingsPage() {
     const [settings, setSettings] = useState(null);
+    const [hlsListSizeInput, setHlsListSizeInput] = useState('');
     const [loading, setLoading] = useState(true);
     const [saving, setSaving] = useState(false);
     const [message, setMessage] = useState(null);
@@ -21,16 +24,25 @@ export default function SettingsPage() {
 
     const loadSettings = async () => {
         setLoading(true);
-        const s = await fetchSettings();
-        setSettings(s);
-        setLoading(false);
+        try {
+            const saved = await fetchSettings();
+            setSettings(saved);
+            setHlsListSizeInput(saved ? String(saved.hlsListSize) : '');
+        } finally {
+            setLoading(false);
+        }
     };
 
     const handleSave = async () => {
+        const hlsListSize = Number(hlsListSizeInput);
+        if (!hlsListSizeInput.trim() || !Number.isInteger(hlsListSize) || hlsListSize > MAX_HLS_LIST_SIZE || (hlsListSize !== 0 && hlsListSize < 3)) {
+            setMessage({ type: 'error', text: 'Informe pelo menos 3 segmentos inteiros ou digite 0 para retenção ilimitada.' });
+            return;
+        }
         setSaving(true);
         setMessage(null);
         try {
-            const restarting = await updateSettings(settings);
+            const restarting = await updateSettings({ ...settings, hlsListSize });
             setMessage({
                 type: 'success',
                 text: restarting ? 'Configurações salvas. A transmissão está iniciando novamente.' : 'Configurações salvas.'
@@ -48,6 +60,15 @@ export default function SettingsPage() {
             <div className="flex flex-col items-center justify-center py-20 gap-4">
                 <Loader2 className="w-10 h-10 text-violet-500 animate-spin" />
                 <p className="text-slate-400 animate-pulse">Carregando configurações...</p>
+            </div>
+        );
+    }
+
+    if (!settings) {
+        return (
+            <div className="flex flex-col items-center justify-center py-20 gap-4">
+                <p role="alert" className="text-slate-300">Falha ao carregar as configurações.</p>
+                <Button onClick={loadSettings}>Tentar novamente</Button>
             </div>
         );
     }
@@ -454,16 +475,21 @@ export default function SettingsPage() {
                             />
                         </div>
                         <div className="space-y-2">
-                            <label className="text-sm font-medium text-slate-300">Tamanho da Lista (Arquivos)</label>
+                            <label htmlFor="hls-list-size" className="text-sm font-medium text-slate-300">Segmentos na playlist</label>
                             <Input
+                                id="hls-list-size"
                                 type="number"
-                                value={settings.hlsListSize}
-                                onChange={(e) => setSettings(prev => ({ ...prev, hlsListSize: parseInt(e.target.value) || 0 }))}
+                                min={0}
+                                max={MAX_HLS_LIST_SIZE}
+                                step={1}
+                                value={hlsListSizeInput}
+                                onChange={(event) => setHlsListSizeInput(event.target.value)}
+                                aria-describedby="hls-list-size-help"
                                 className="bg-slate-950 border-slate-800 h-10"
-                                placeholder="5 (Padrão) - 0 para Infinito"
+                                placeholder="5"
                             />
-                            <p className="text-xs text-slate-500 mt-1">
-                                Define quantos arquivos manter. Use <b>0</b> para criar uma live infinita (estilo gravação). (Ex: 5 arquivos de 2s = 10s de janela). Arquivos antigos são apagados automaticamente.
+                            <p id="hls-list-size-help" className="text-xs text-slate-500 mt-1">
+                                Informe pelo menos 3 segmentos. Digite <b>0</b> para manter todos os segmentos da transmissão em disco.
                             </p>
                         </div>
                     </CardContent>

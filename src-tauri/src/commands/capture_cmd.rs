@@ -3,7 +3,7 @@ use crate::commands::stream::{find_stream, get_status};
 use crate::db::DbStream;
 use crate::output::HlsConfig;
 use crate::state::{ActiveCapture, AppState, StatusResponse, StreamRuntime};
-use tauri::{AppHandle, Emitter, State, Url, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, LogicalSize, State, Url, WebviewUrl, WebviewWindowBuilder};
 
 #[tauri::command]
 pub fn get_capture_sources() -> Vec<CaptureSource> {
@@ -162,16 +162,26 @@ fn start_saved(
     let runtime = state.runtime.clone();
     let app = app.clone();
     let id = stream.id.clone();
-    let playback_id = uuid::Uuid::new_v4().to_string();
     let update = move |status, message| {
-        runtime.lock().unwrap().insert(
-            id.clone(),
-            StreamRuntime {
-                status,
-                message,
-                playback_id: playback_id.clone(),
-            },
-        );
+        {
+            let mut streams = runtime.lock().unwrap();
+            let playback_id = if status == "starting" {
+                uuid::Uuid::new_v4().to_string()
+            } else {
+                streams
+                    .get(&id)
+                    .map(|stream| stream.playback_id.clone())
+                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
+            };
+            streams.insert(
+                id.clone(),
+                StreamRuntime {
+                    status,
+                    message,
+                    playback_id,
+                },
+            );
+        }
         let _ = app.emit_to("main", "hipocast:stream-status", ());
     };
     update("starting", None);
@@ -202,6 +212,11 @@ fn browser_source(
                 let _ = window.show();
                 let _ = window.set_skip_taskbar(false);
                 let _ = window.unminimize();
+                window
+                    .set_size(LogicalSize::new(settings.width, settings.height))
+                    .map_err(|error| {
+                        format!("Não foi possível ajustar a janela da página: {error}")
+                    })?;
                 let _ = window.set_title(title);
                 return Ok(format!("window:{}", hwnd.0 as usize));
             }

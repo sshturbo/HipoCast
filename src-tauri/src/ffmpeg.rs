@@ -8,13 +8,15 @@ use crate::encoder::{
     build_single_audio_filter, build_stream_mapping, build_video_encoding_args, get_encoder_config,
     get_ffmpeg_path, AudioConfig, VideoEncoderConfig,
 };
-use crate::output::HlsConfig;
+use crate::output::{HlsConfig, HlsGeneration};
 use crate::AppSettings;
+use std::path::Path;
 use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 
 /// FFmpeg process wrapper para streaming HLS
 pub struct FfmpegEncoder {
     process: Child,
+    hls: HlsGeneration,
 }
 
 impl FfmpegEncoder {
@@ -48,8 +50,7 @@ impl FfmpegEncoder {
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let ffmpeg_path = get_ffmpeg_path();
 
-        // Prepara output (cria diretórios, etc)
-        hls_config.prepare_directory()?;
+        let hls = hls_config.prepare_generation()?;
 
         // Inicia comando FFmpeg
         let mut command = Command::new(&ffmpeg_path);
@@ -80,15 +81,21 @@ impl FfmpegEncoder {
         let audio_args = build_audio_input_args(&audio_config);
         command.args(&audio_args);
 
-        // Input de vídeo (sempre segundo, exceto quando há mix de áudio)
+        // Raw video does not carry timing; use its arrival time and retain DirectShow's audio timestamps.
         command.args([
+            "-probesize",
+            "32",
+            "-analyzeduration",
+            "1",
+            "-use_wallclock_as_timestamps",
+            "1",
             "-f",
             "rawvideo",
             "-pix_fmt",
             "rgba",
             "-s",
             &format!("{}x{}", video_config.width, video_config.height),
-            "-r",
+            "-framerate",
             &video_config.fps.to_string(),
             "-i",
             "pipe:0",
@@ -109,6 +116,15 @@ impl FfmpegEncoder {
 
         let video_args = build_video_encoding_args(&video_config);
         command.args(&video_args);
+        let keyframe_interval = hls_config
+            .segment_duration()
+            .max(1.0 / f64::from(video_config.fps));
+        command.args([
+            "-fps_mode:v",
+            "vfr",
+            "-force_key_frames:v",
+            &format!("expr:gte(t,n_forced*{keyframe_interval})"),
+        ]);
 
         // ===== AUDIO ENCODING =====
 
@@ -124,7 +140,7 @@ impl FfmpegEncoder {
         // ===== OUTPUT HLS =====
 
         // Argumentos de formato HLS
-        let format_args = hls_config.to_ffmpeg_args();
+        let format_args = hls.to_ffmpeg_args();
         command.args(&format_args);
 
         // -shortest se áudio desabilitado
@@ -133,12 +149,12 @@ impl FfmpegEncoder {
         }
 
         // Argumentos finais de output
-        let output_args = hls_config.to_ffmpeg_output_args();
+        let output_args = hls.to_ffmpeg_output_args();
         command.args(&output_args);
 
         // ===== PROCESS CONFIG =====
 
-        let stderr_log = hls_config
+        let stderr_log = hls
             .create_log_file()
             .map_err(|e| format!("Falha ao criar arquivo de log: {}", e))?;
 
@@ -166,7 +182,15 @@ impl FfmpegEncoder {
             video_config.codec
         );
 
-        Ok(Self { process })
+        Ok(Self { process, hls })
+    }
+
+    pub fn publish_playlist(&mut self) -> std::io::Result<bool> {
+        self.hls.publish_playlist()
+    }
+
+    pub fn log_path(&self) -> &Path {
+        self.hls.log_path()
     }
 
     pub fn take_input(&mut self) -> Option<ChildStdin> {

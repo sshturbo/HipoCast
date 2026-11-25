@@ -5,6 +5,7 @@ export default function StreamPlayer({ hlsPath, status, message, enabled }) {
     const videoRef = useRef(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
+    const [playbackAttempt, setPlaybackAttempt] = useState(0);
     const [visible, setVisible] = useState(() => !document.hidden);
 
     useEffect(() => {
@@ -79,7 +80,7 @@ export default function StreamPlayer({ hlsPath, status, message, enabled }) {
             video.removeAttribute('src');
             video.load();
         };
-    }, [hlsPath, status, enabled, visible]);
+    }, [hlsPath, status, enabled, visible, playbackAttempt]);
 
     if (status === 'starting') {
         return (
@@ -130,6 +131,13 @@ export default function StreamPlayer({ hlsPath, status, message, enabled }) {
                 <div role="alert" className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-black/80 p-3 text-center text-red-300">
                     <AlertCircle className="h-8 w-8" />
                     <span className="text-xs">{error}</span>
+                    <button
+                        type="button"
+                        className="rounded-md border border-slate-500 px-3 py-1 text-xs text-slate-100 hover:bg-slate-800"
+                        onClick={() => setPlaybackAttempt((attempt) => attempt + 1)}
+                    >
+                        Tentar novamente
+                    </button>
                 </div>
             )}
         </div>

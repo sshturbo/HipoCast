@@ -277,6 +277,10 @@ pub fn build_audio_input_args(config: &AudioConfig) -> Vec<String> {
             ]);
         }
         args.extend([
+            "-probesize".into(),
+            "32".into(),
+            "-analyzeduration".into(),
+            "1".into(),
             "-f".into(),
             "dshow".into(),
             "-thread_queue_size".into(),
@@ -295,22 +299,22 @@ pub fn build_audio_input_args(config: &AudioConfig) -> Vec<String> {
     args
 }
 
+// Ignore large or backward driver clock jumps before aresample can synthesize silence.
+const LIVE_AUDIO_SYNC: &str = "asetpts='if(isnan(PREV_INPTS),PTS,PREV_OUTPTS+if(between(PTS-PREV_INPTS,0,2/TB),PTS-PREV_INPTS,NB_SAMPLES/(SR*TB)))',aresample=async=1000";
+
 /// Gera o filtro de mixagem de áudio para FFmpeg
 pub fn build_audio_mix_filter(config: &AudioConfig) -> Option<String> {
     if config.enabled && config.microphone_enabled {
-        // aresample=async=1: Corrige drift de timestamp gradual
-        let base_filter = "aresample=async=1";
-
         let sys_filter_str = if !config.audio_filters.is_empty() {
-            format!("{},{}", base_filter, config.audio_filters)
+            format!("{LIVE_AUDIO_SYNC},{}", config.audio_filters)
         } else {
-            base_filter.to_string()
+            LIVE_AUDIO_SYNC.to_string()
         };
 
         let mic_filter_str = if !config.microphone_filters.is_empty() {
-            format!("{},{}", base_filter, config.microphone_filters)
+            format!("{LIVE_AUDIO_SYNC},{}", config.microphone_filters)
         } else {
-            base_filter.to_string()
+            LIVE_AUDIO_SYNC.to_string()
         };
 
         let mix_filter = format!(
@@ -352,7 +356,8 @@ pub fn build_video_encoding_args(config: &VideoEncoderConfig) -> Vec<String> {
     // Adiciona preset do codec
     args.extend(config.preset_args.clone());
     if config.codec == "libx264" {
-        let pixels_per_second = u64::from(config.width) * u64::from(config.height) * u64::from(config.fps);
+        let pixels_per_second =
+            u64::from(config.width) * u64::from(config.height) * u64::from(config.fps);
         let budget = if pixels_per_second <= 1920 * 1080 * 30 {
             4
         } else if pixels_per_second <= 1920 * 1080 * 60 {
@@ -412,19 +417,59 @@ pub fn build_single_audio_filter(config: &AudioConfig) -> Option<String> {
         && !(config.enabled && config.microphone_enabled);
 
     if is_single_audio {
-        // aresample=async=1: Corrige drift de timestamp gradual
-        let base_filter = "aresample=async=1";
-
         let filters = if config.enabled && !config.audio_filters.is_empty() {
-            format!("{},{}", base_filter, config.audio_filters)
+            format!("{LIVE_AUDIO_SYNC},{}", config.audio_filters)
         } else if config.microphone_enabled && !config.microphone_filters.is_empty() {
-            format!("{},{}", base_filter, config.microphone_filters)
+            format!("{LIVE_AUDIO_SYNC},{}", config.microphone_filters)
         } else {
-            base_filter.to_string()
+            LIVE_AUDIO_SYNC.to_string()
         };
 
         Some(filters)
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn audio_keeps_short_gaps_and_ignores_large_clock_jumps() -> Result<(), std::io::Error> {
+        let filter = build_single_audio_filter(&AudioConfig {
+            enabled: true,
+            ..AudioConfig::default()
+        })
+        .unwrap();
+        for (gap, expected_bytes) in [(0.5, 240_000), (30.0, 192_000)] {
+            let source = format!("sine=frequency=440:sample_rate=48000:duration=2,asetpts='PTS+if(gte(T,1),{gap}/TB,0)'");
+            let output = Command::new(get_ffmpeg_path())
+                .args([
+                    "-hide_banner",
+                    "-v",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    &source,
+                    "-af",
+                    &filter,
+                    "-c:a",
+                    "pcm_s16le",
+                    "-f",
+                    "s16le",
+                    "-",
+                ])
+                .creation_flags(CREATE_NO_WINDOW)
+                .output()?;
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(output.stdout.len(), expected_bytes);
+        }
+        Ok(())
     }
 }

@@ -3,8 +3,11 @@ use crate::state::{AppSettings, AppState};
 use tauri::{AppHandle, State};
 
 #[tauri::command]
-pub fn get_settings(state: State<'_, AppState>) -> AppSettings {
-    state.db.get_settings().unwrap_or_default()
+pub fn get_settings(state: State<'_, AppState>) -> Result<AppSettings, String> {
+    state
+        .db
+        .get_settings()
+        .map_err(|error| format!("Falha ao carregar as configurações: {error}"))
 }
 
 #[tauri::command]
@@ -14,6 +17,9 @@ pub async fn update_settings(
     new_settings: AppSettings,
 ) -> Result<bool, String> {
     validate_settings(&new_settings)?;
+    if matches!(new_settings.hls_list_size, 1 | 2) {
+        return Err("Use pelo menos 3 segmentos. Digite 0 para retenção ilimitada.".into());
+    }
     let mut capture = state.capture.lock().await;
     state
         .db

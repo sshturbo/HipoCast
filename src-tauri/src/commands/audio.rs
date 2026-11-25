@@ -33,7 +33,9 @@ pub fn get_stream_audio_config(
         .db
         .get_stream_audio_config(&stream_id)
         .map_err(|error| error.to_string())?;
-    Ok(config.unwrap_or_else(|| state.db.create_default_audio_config_from_global(&stream_id)))
+    Ok(normalize_audio_mode(config.unwrap_or_else(|| {
+        state.db.create_default_audio_config_from_global(&stream_id)
+    })))
 }
 
 #[tauri::command]
@@ -42,8 +44,12 @@ pub async fn save_stream_audio_config(
     state: State<'_, AppState>,
     config: StreamAudioConfig,
 ) -> Result<(), String> {
-    if !matches!(config.audio_mode.as_str(), "system" | "muted") {
-        return Err("Selecione áudio do sistema ou mudo.".into());
+    let config = normalize_audio_mode(config);
+    if !matches!(
+        config.audio_mode.as_str(),
+        "system" | "microphone" | "silent"
+    ) {
+        return Err("Selecione áudio do sistema, somente microfone ou mudo.".into());
     }
     let mut capture = state.capture.lock().await;
     state
@@ -72,5 +78,46 @@ pub fn reset_stream_audio_config(
         .db
         .delete_stream_audio_config(&stream_id)
         .map_err(|error| error.to_string())?;
-    Ok(config)
+    Ok(normalize_audio_mode(config))
+}
+
+fn normalize_audio_mode(mut config: StreamAudioConfig) -> StreamAudioConfig {
+    match config.audio_mode.as_str() {
+        "muted" => {
+            config.audio_mode = if config.enable_microphone {
+                "microphone"
+            } else {
+                "silent"
+            }
+            .into();
+        }
+        "microphone" => config.enable_microphone = true,
+        "silent" => config.enable_microphone = false,
+        _ => {}
+    }
+    config
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalizes_legacy_audio_modes_and_keeps_silent_input_disabled() {
+        for (mode, microphone, expected_mode, expected_microphone) in [
+            ("muted", true, "microphone", true),
+            ("muted", false, "silent", false),
+            ("microphone", false, "microphone", true),
+            ("silent", true, "silent", false),
+            ("system", true, "system", true),
+        ] {
+            let normalized = normalize_audio_mode(StreamAudioConfig {
+                audio_mode: mode.into(),
+                enable_microphone: microphone,
+                ..StreamAudioConfig::default()
+            });
+            assert_eq!(normalized.audio_mode, expected_mode);
+            assert_eq!(normalized.enable_microphone, expected_microphone);
+        }
+    }
 }

@@ -1,11 +1,13 @@
 use crate::encoder::{enumerate_audio_devices, AudioConfig};
 use crate::ffmpeg::FfmpegEncoder;
+use crate::gpu_scale::GpuScaler;
 use crate::output::HlsConfig;
 use crate::stream_config::StreamAudioConfig;
 use crate::AppSettings;
 use fast_image_resize::{images::Image, PixelType, ResizeAlg, ResizeOptions, Resizer};
 use serde::Serialize;
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::path::Path;
 use std::process::ChildStdin;
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread::{self, JoinHandle};
@@ -127,6 +129,7 @@ impl Drop for CaptureHandle {
 struct CaptureFlags {
     frames: Arc<Frames>,
     interval: Duration,
+    output_size: (u32, u32),
 }
 
 struct CaptureHandler {
@@ -145,11 +148,7 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
             frames: ctx.flags.frames,
             interval: ctx.flags.interval,
             next_frame: None,
-            readback: FrameReadback {
-                device: ctx.device,
-                context: ctx.device_context,
-                texture: None,
-            },
+            readback: FrameReadback::new(ctx.device, ctx.device_context, ctx.flags.output_size),
         })
     }
 
@@ -165,15 +164,27 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
                 control.stop();
                 return Ok(());
             }
-            if width == 0 || height == 0 || !accept_frame(&mut self.next_frame, Instant::now(), self.interval) {
+            if width == 0
+                || height == 0
+                || !accept_frame(&mut self.next_frame, Instant::now(), self.interval)
+            {
                 return Ok(());
             }
             std::mem::take(&mut state.spare_pixels)
         };
         // The capture callback owns the frame for the duration of this copy.
-        self.readback.copy(unsafe { frame.as_raw_texture() }, width, height, &mut pixels)?;
+        let (width, height) = self.readback.copy_for_output(
+            unsafe { frame.as_raw_texture() },
+            width,
+            height,
+            &mut pixels,
+        )?;
         let mut state = self.frames.state.lock().unwrap();
-        if let Some(skipped) = state.latest.replace(FrameData { data: pixels, width, height }) {
+        if let Some(skipped) = state.latest.replace(FrameData {
+            data: pixels,
+            width,
+            height,
+        }) {
             state.recycle_pixels(skipped.data);
         }
         self.frames.available.notify_one();
@@ -204,9 +215,60 @@ struct FrameReadback {
     device: ID3D11Device,
     context: ID3D11DeviceContext,
     texture: Option<(u32, u32, ID3D11Texture2D)>,
+    output_size: (u32, u32),
+    gpu_scaler: Option<GpuScaler>,
+    gpu_scaling_supported: bool,
 }
 
 impl FrameReadback {
+    fn new(device: ID3D11Device, context: ID3D11DeviceContext, output_size: (u32, u32)) -> Self {
+        Self {
+            device,
+            context,
+            texture: None,
+            output_size,
+            gpu_scaler: None,
+            gpu_scaling_supported: true,
+        }
+    }
+
+    fn copy_for_output(
+        &mut self,
+        source: &ID3D11Texture2D,
+        width: u32,
+        height: u32,
+        pixels: &mut Vec<u8>,
+    ) -> Result<(u32, u32), CaptureError> {
+        let (output_width, output_height) = self.output_size;
+        let downscale =
+            output_width <= width && output_height <= height && self.output_size != (width, height);
+        if self.gpu_scaling_supported && downscale {
+            let result = (|| {
+                if self.gpu_scaler.is_none() {
+                    self.gpu_scaler = Some(GpuScaler::new(&self.device)?);
+                }
+                let scaled = self.gpu_scaler.as_mut().unwrap().resize(
+                    &self.device,
+                    &self.context,
+                    source,
+                    (width, height),
+                    self.output_size,
+                )?;
+                self.copy(&scaled, output_width, output_height, pixels)
+            })();
+            match result {
+                Ok(()) => return Ok(self.output_size),
+                Err(error) => {
+                    tracing::warn!(%error, "Escala Direct3D indisponível, usando escala por CPU");
+                    self.gpu_scaler = None;
+                    self.gpu_scaling_supported = false;
+                }
+            }
+        }
+        self.copy(source, width, height, pixels)?;
+        Ok((width, height))
+    }
+
     fn copy(
         &mut self,
         source: &ID3D11Texture2D,
@@ -214,33 +276,49 @@ impl FrameReadback {
         height: u32,
         pixels: &mut Vec<u8>,
     ) -> Result<(), CaptureError> {
-        if self.texture.as_ref().is_none_or(|(w, h, _)| (*w, *h) != (width, height)) {
+        if self
+            .texture
+            .as_ref()
+            .is_none_or(|(w, h, _)| (*w, *h) != (width, height))
+        {
             let desc = D3D11_TEXTURE2D_DESC {
                 Width: width,
                 Height: height,
                 MipLevels: 1,
                 ArraySize: 1,
                 Format: DXGI_FORMAT_R8G8B8A8_UNORM,
-                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                SampleDesc: DXGI_SAMPLE_DESC {
+                    Count: 1,
+                    Quality: 0,
+                },
                 Usage: D3D11_USAGE_STAGING,
                 CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
                 ..Default::default()
             };
             let mut texture = None;
-            unsafe { self.device.CreateTexture2D(&desc, None, Some(&mut texture))? };
-            self.texture = Some((width, height, texture.ok_or("Direct3D não criou a textura de leitura.")?));
+            unsafe {
+                self.device
+                    .CreateTexture2D(&desc, None, Some(&mut texture))?
+            };
+            self.texture = Some((
+                width,
+                height,
+                texture.ok_or("Direct3D não criou a textura de leitura.")?,
+            ));
         }
         let (_, _, texture) = self.texture.as_ref().unwrap();
-        let mut mapped = MappedFrame {
-            context: &self.context,
-            texture,
-            data: D3D11_MAPPED_SUBRESOURCE::default(),
-        };
+        let mut mapped_resource = D3D11_MAPPED_SUBRESOURCE::default();
         // Both textures belong to the capture device and use the session's RGBA8 format.
         unsafe {
             self.context.CopyResource(texture, source);
-            self.context.Map(texture, 0, D3D11_MAP_READ, 0, Some(&mut mapped.data))?;
+            self.context
+                .Map(texture, 0, D3D11_MAP_READ, 0, Some(&mut mapped_resource))?;
         }
+        let mapped = MappedFrame {
+            context: &self.context,
+            texture,
+            data: mapped_resource,
+        };
 
         let row_size = width as usize * 4;
         let stride = mapped.data.RowPitch as usize;
@@ -255,7 +333,9 @@ impl FrameReadback {
             pixels.extend_from_slice(unsafe { std::slice::from_raw_parts(data, size) });
         } else {
             for row in 0..height as usize {
-                pixels.extend_from_slice(unsafe { std::slice::from_raw_parts(data.add(row * stride), row_size) });
+                pixels.extend_from_slice(unsafe {
+                    std::slice::from_raw_parts(data.add(row * stride), row_size)
+                });
             }
         }
         Ok(())
@@ -270,9 +350,7 @@ struct MappedFrame<'a> {
 
 impl Drop for MappedFrame<'_> {
     fn drop(&mut self) {
-        if !self.data.pData.is_null() {
-            unsafe { self.context.Unmap(self.texture, 0) };
-        }
+        unsafe { self.context.Unmap(self.texture, 0) };
     }
 }
 
@@ -318,33 +396,97 @@ fn run_capture(
     frames: &Arc<Frames>,
     update: &impl Fn(&'static str, Option<String>),
 ) -> Result<(), String> {
-    let (audio, notice) = resolve_audio(settings, stream_audio);
+    let (mut audio, notice) = resolve_audio(settings, stream_audio);
+    let mut notice = notice;
+    loop {
+        if frames.state.lock().unwrap().stopping {
+            return Ok(());
+        }
+        if notice.is_some() {
+            update("starting", notice.clone());
+        }
+        let outcome = run_capture_attempt(
+            source_id, settings, &audio, hls, hls_port, frames, &notice, update,
+        );
+        if let Err(error) = &outcome {
+            if (audio.enabled || audio.microphone_enabled) && error.retry_without_audio {
+                {
+                    let mut state = frames.state.lock().unwrap();
+                    if state.stopping {
+                        return Ok(());
+                    }
+                    state.source_closed = false;
+                    if let Some(frame) = state.latest.take() {
+                        state.recycle_pixels(frame.data);
+                    }
+                }
+                tracing::warn!(stream = hls.stream_id(), error = %error.message, "Reiniciando sem áudio após falha do FFmpeg");
+                audio.enabled = false;
+                audio.microphone_enabled = false;
+                notice = Some(
+                    "Falha no áudio do FFmpeg. A transmissão foi retomada em silêncio.".into(),
+                );
+                continue;
+            }
+        }
+        return outcome.map_err(|error| error.message);
+    }
+}
+
+struct AttemptError {
+    message: String,
+    retry_without_audio: bool,
+}
+
+impl From<String> for AttemptError {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            retry_without_audio: false,
+        }
+    }
+}
+
+fn run_capture_attempt(
+    source_id: &str,
+    settings: &AppSettings,
+    audio: &AudioConfig,
+    hls: &HlsConfig,
+    hls_port: u16,
+    frames: &Arc<Frames>,
+    notice: &Option<String>,
+    update: &impl Fn(&'static str, Option<String>),
+) -> Result<(), AttemptError> {
     if frames.state.lock().unwrap().stopping {
         return Ok(());
     }
-    update("starting", notice.clone());
 
-    let mut encoder = FfmpegEncoder::new(settings, audio, hls)
+    let mut encoder = FfmpegEncoder::new(settings, audio.clone(), hls)
         .map_err(|error| format!("Não foi possível iniciar o FFmpeg: {error}"))?;
     let input = encoder
         .take_input()
-        .ok_or("O FFmpeg não disponibilizou a entrada de vídeo.")?;
+        .ok_or_else(|| "O FFmpeg não disponibilizou a entrada de vídeo.".to_string())?;
     if frames.state.lock().unwrap().stopping {
         return Ok(());
     }
-    let capture = start_source(source_id, frames.clone(), settings.framerate)
-        .map_err(|error| format!("Não foi possível abrir a fonte de captura: {error}"))?;
+    let capture = start_source(
+        source_id,
+        frames.clone(),
+        settings.framerate,
+        (settings.width, settings.height),
+    )
+    .map_err(|error| format!("Não foi possível abrir a fonte de captura: {error}"))?;
 
     let writer_frames = frames.clone();
     let (width, height, framerate) = (settings.width, settings.height, settings.framerate);
     let writer =
         thread::spawn(move || write_frames(input, &writer_frames, width, height, framerate));
 
-    let playlist = hls.playlist_path();
     let route = hls.playlist_route();
     let timeout = Duration::from_secs_f64(12.0 + settings.hls_time * 2.0);
-    let mut last_progress = Instant::now();
-    let mut last_modified = None;
+    let started = Instant::now();
+    let mut last_progress = started;
+    let mut published = false;
     let mut ready = false;
 
     let outcome = loop {
@@ -363,7 +505,7 @@ fn run_capture(
         match encoder.try_wait() {
             Ok(Some(status)) => {
                 break Err(encoder_error(
-                    hls,
+                    encoder.log_path(),
                     &format!("O FFmpeg encerrou ({status})."),
                 ));
             }
@@ -372,37 +514,41 @@ fn run_capture(
         }
         if writer.is_finished() {
             break Err(encoder_error(
-                hls,
+                encoder.log_path(),
                 "O envio de vídeo ao FFmpeg foi interrompido.",
             ));
         }
-        if !ready && hls.playlist_is_ready() && crate::server::playlist_is_served(hls_port, &route)
-        {
+        match encoder.publish_playlist() {
+            Ok(true) => {
+                published = true;
+                last_progress = Instant::now();
+            }
+            Ok(false) => {}
+            Err(error) => break Err(format!("Falha ao publicar a playlist HLS: {error}")),
+        }
+        if !ready && published && crate::server::playlist_is_served(hls_port, &route) {
             ready = true;
             last_progress = Instant::now();
             update("running", notice.clone());
         }
-        if ready {
-            let modified = std::fs::metadata(&playlist)
-                .and_then(|metadata| metadata.modified())
-                .ok();
-            if modified.is_some() && modified != last_modified {
-                last_modified = modified;
-                last_progress = Instant::now();
-            }
-        }
-        if last_progress.elapsed() >= timeout {
+        let elapsed = if ready {
+            last_progress.elapsed()
+        } else {
+            started.elapsed()
+        };
+        if elapsed >= timeout {
             let message = if ready {
                 "A playlist HLS parou de receber novos segmentos."
             } else {
                 "O FFmpeg não gerou a playlist HLS a tempo."
             };
-            break Err(encoder_error(hls, message));
+            break Err(encoder_error(encoder.log_path(), message));
         }
         thread::sleep(Duration::from_millis(100));
     };
 
-    frames.close();
+    frames.state.lock().unwrap().source_closed = true;
+    frames.available.notify_all();
     let encoder_result = encoder
         .stop()
         .map_err(|error| format!("Falha ao encerrar o FFmpeg: {error}"));
@@ -414,24 +560,32 @@ fn run_capture(
         Err(_) => tracing::error!("A thread de envio de vídeo terminou inesperadamente"),
         Ok(Ok(())) => {}
     }
-    outcome.and(encoder_result).and(capture_result)
+    outcome
+        .and(encoder_result)
+        .and(capture_result)
+        .map_err(|message| AttemptError {
+            message,
+            retry_without_audio: audio_buffer_failed(&read_encoder_log(encoder.log_path())),
+        })
 }
 
 fn start_source(
     source_id: &str,
     frames: Arc<Frames>,
     framerate: u32,
+    output_size: (u32, u32),
 ) -> Result<CaptureControl<CaptureHandler, CaptureError>, CaptureError> {
     let (kind, value) = source_id
         .split_once(':')
         .ok_or("Fonte de captura inválida.")?;
     let value = value.parse::<usize>()?;
     let interval = Duration::from_secs_f64(1.0 / f64::from(framerate));
-    let native_interval = if GraphicsCaptureApi::is_minimum_update_interval_supported().unwrap_or(false) {
-        MinimumUpdateIntervalSettings::Custom(interval)
-    } else {
-        MinimumUpdateIntervalSettings::Default
-    };
+    let native_interval =
+        if GraphicsCaptureApi::is_minimum_update_interval_supported().unwrap_or(false) {
+            MinimumUpdateIntervalSettings::Custom(interval)
+        } else {
+            MinimumUpdateIntervalSettings::Default
+        };
     macro_rules! capture {
         ($target:expr) => {
             CaptureHandler::start_free_threaded(Settings::new(
@@ -442,7 +596,11 @@ fn start_source(
                 native_interval,
                 DirtyRegionSettings::Default,
                 ColorFormat::Rgba8,
-                CaptureFlags { frames, interval },
+                CaptureFlags {
+                    frames,
+                    interval,
+                    output_size,
+                },
             ))?
         };
     }
@@ -513,7 +671,11 @@ fn write_frames(
                     None => Image::new(width, height, PixelType::U8x4),
                 };
                 resizer.resize(&source, &mut target, &options)?;
-                frames.state.lock().unwrap().recycle_pixels(source.into_vec());
+                frames
+                    .state
+                    .lock()
+                    .unwrap()
+                    .recycle_pixels(source.into_vec());
                 target.into_vec()
             };
             previous = Some(data);
@@ -521,10 +683,9 @@ fn write_frames(
         if let Some(data) = &previous {
             input.write_all(data)?;
         }
-        next_frame += interval;
-        if next_frame + interval < Instant::now() {
-            next_frame = Instant::now() + interval;
-        }
+        // Skip missed capture slots without changing the timestamps generated at pipe ingress.
+        let now = Instant::now();
+        next_frame = (next_frame + interval).max(now);
     }
 }
 
@@ -532,10 +693,10 @@ fn resolve_audio(
     settings: &AppSettings,
     stream: StreamAudioConfig,
 ) -> (AudioConfig, Option<String>) {
-    let wants_system = stream.audio_mode != "muted";
+    let wants_system = matches!(stream.audio_mode.as_str(), "system" | "process");
+    let wants_microphone = stream.audio_mode != "silent" && stream.enable_microphone;
     let system_selected = wants_system && !settings.audio_device.trim().is_empty();
-    let microphone_selected =
-        stream.enable_microphone && !stream.microphone_device.trim().is_empty();
+    let microphone_selected = wants_microphone && !stream.microphone_device.trim().is_empty();
     let devices = if system_selected || microphone_selected {
         enumerate_audio_devices().unwrap_or_else(|error| {
             tracing::warn!(%error, "Falha ao verificar os dispositivos de áudio");
@@ -556,7 +717,7 @@ fn resolve_audio(
     if wants_system && !enabled {
         notices.push("Dispositivo de áudio do sistema indisponível. Confira as configurações.");
     }
-    if stream.enable_microphone && !microphone_enabled {
+    if wants_microphone && !microphone_enabled {
         notices.push("Microfone indisponível. Confira as configurações.");
     }
     let notice = (!notices.is_empty()).then(|| notices.join(" "));
@@ -576,20 +737,44 @@ fn resolve_audio(
     )
 }
 
-fn encoder_error(hls: &HlsConfig, message: &str) -> String {
-    let details = (|| {
-        let mut file = std::fs::File::open(format!("{}/ffmpeg.log", hls.stream_dir())).ok()?;
+fn read_encoder_log(path: &Path) -> String {
+    (|| {
+        let mut file = std::fs::File::open(path).ok()?;
         let offset = file.metadata().ok()?.len().saturating_sub(4096);
         file.seek(SeekFrom::Start(offset)).ok()?;
         let mut bytes = Vec::new();
         file.take(4096).read_to_end(&mut bytes).ok()?;
-        let log = String::from_utf8_lossy(&bytes);
-        let detail = log.lines().rev().find(|line| !line.trim().is_empty())?;
-        Some(detail.trim().to_string())
-    })();
+        Some(String::from_utf8_lossy(&bytes).into_owned())
+    })()
+    .unwrap_or_default()
+}
+
+fn audio_buffer_failed(log: &str) -> bool {
+    let audio_failure = log.lines().any(|line| {
+        (line.starts_with("[af#") || line.starts_with("[fc#"))
+            && line.contains("No space left on device")
+    });
+    let file_failure = log.lines().any(|line| {
+        (line.starts_with("[hls ") || line.starts_with("[out#"))
+            && (line.contains("No space left on device") || line.contains("Failed to open"))
+    });
+    audio_failure && !file_failure
+}
+
+fn encoder_error(path: &Path, message: &str) -> String {
+    let log = read_encoder_log(path);
+    let details = log
+        .lines()
+        .rev()
+        .find(|line| {
+            !line.trim().is_empty()
+                && !line.contains("Terminating thread")
+                && !line.contains("Task finished")
+        })
+        .or_else(|| log.lines().next_back());
     details.map_or_else(
         || message.to_string(),
-        |detail| format!("{message} {detail}"),
+        |detail| format!("{message} {}", detail.trim()),
     )
 }
 
@@ -597,6 +782,177 @@ fn encoder_error(hls: &HlsConfig, message: &str) -> String {
 mod tests {
     use super::*;
     use crate::server::{playlist_is_served, start_server};
+    use windows::Win32::Graphics::{
+        Direct3D::D3D_DRIVER_TYPE_WARP,
+        Direct3D11::{
+            D3D11CreateDevice, D3D11_CREATE_DEVICE_FLAG, D3D11_SDK_VERSION, D3D11_SUBRESOURCE_DATA,
+        },
+        Dxgi::IDXGIAdapter,
+    };
+
+    #[test]
+    fn one_hundred_twenty_hz_source_is_sampled_at_thirty_fps() {
+        let start = Instant::now();
+        let mut next_frame = None;
+        let interval = Duration::from_secs_f64(1.0 / 30.0);
+        let accepted = (0..120)
+            .filter(|frame| {
+                accept_frame(
+                    &mut next_frame,
+                    start + Duration::from_secs_f64(f64::from(*frame) / 120.0),
+                    interval,
+                )
+            })
+            .count();
+        assert_eq!(accepted, 30);
+    }
+
+    fn warp_readback(output_size: (u32, u32)) -> Result<FrameReadback, CaptureError> {
+        let (mut device, mut context) = (None, None);
+        unsafe {
+            D3D11CreateDevice(
+                None::<&IDXGIAdapter>,
+                D3D_DRIVER_TYPE_WARP,
+                Default::default(),
+                D3D11_CREATE_DEVICE_FLAG::default(),
+                None,
+                D3D11_SDK_VERSION,
+                Some(&mut device),
+                None,
+                Some(&mut context),
+            )?;
+        }
+        Ok(FrameReadback::new(
+            device.ok_or("No D3D11 device")?,
+            context.ok_or("No D3D11 context")?,
+            output_size,
+        ))
+    }
+
+    fn source_texture(
+        device: &ID3D11Device,
+        width: u32,
+        height: u32,
+        pixels: &[u8],
+    ) -> Result<ID3D11Texture2D, CaptureError> {
+        assert_eq!(pixels.len(), (width * height * 4) as usize);
+        let data = D3D11_SUBRESOURCE_DATA {
+            pSysMem: pixels.as_ptr().cast(),
+            SysMemPitch: width * 4,
+            SysMemSlicePitch: 0,
+        };
+        let desc = D3D11_TEXTURE2D_DESC {
+            Width: width,
+            Height: height,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: DXGI_FORMAT_R8G8B8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            ..Default::default()
+        };
+        let mut source = None;
+        // The data has exactly width * height initialized RGBA pixels.
+        unsafe { device.CreateTexture2D(&desc, Some(&data), Some(&mut source))? };
+        source.ok_or_else(|| "No source texture".into())
+    }
+
+    #[test]
+    fn d3d_readback_reuses_texture_and_packs_pixels_after_resize() -> Result<(), CaptureError> {
+        let mut readback = warp_readback((64, 64))?;
+        let mut pixels = Vec::new();
+        let mut previous_texture = None;
+        for (width, height, value) in [(13, 9, 64_u8), (13, 9, 123), (29, 7, 220)] {
+            let expected: Vec<u8> = (0..width * height * 4)
+                .map(|index| value.wrapping_add(index as u8))
+                .collect();
+            let source = source_texture(&readback.device, width, height, &expected)?;
+            readback.copy(&source, width, height, &mut pixels)?;
+            assert_eq!(pixels, expected);
+            let (_, _, texture) = readback.texture.as_ref().unwrap();
+            if value == 123 {
+                assert_eq!(previous_texture.as_ref(), Some(texture));
+            }
+            if value == 220 {
+                assert_ne!(previous_texture.as_ref(), Some(texture));
+            }
+            previous_texture = Some(texture.clone());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn d3d_downscales_before_readback_and_matches_cpu_pixels() -> Result<(), CaptureError> {
+        let (output_width, output_height) = (5, 4);
+        let mut readback = warp_readback((output_width, output_height))?;
+        let mut pixels = Vec::new();
+        let mut staging_texture = None;
+
+        for (width, height, value) in [(13, 9, 63_u8), (13, 9, 180), (29, 7, 236)] {
+            let original: Vec<u8> = (0..width * height * 4)
+                .map(|index| value.wrapping_add(index as u8))
+                .collect();
+            let source = source_texture(&readback.device, width, height, &original)?;
+            assert_eq!(
+                readback.copy_for_output(&source, width, height, &mut pixels)?,
+                (output_width, output_height)
+            );
+
+            let mut expected = Image::new(output_width, output_height, PixelType::U8x4);
+            let input = Image::from_vec_u8(width, height, original, PixelType::U8x4)?;
+            let options = ResizeOptions::new().resize_alg(ResizeAlg::Nearest);
+            Resizer::new().resize(&input, &mut expected, &options)?;
+            assert_eq!(pixels, expected.buffer());
+
+            let (staging_width, staging_height, texture) = readback.texture.as_ref().unwrap();
+            assert_eq!(
+                (*staging_width, *staging_height),
+                (output_width, output_height)
+            );
+            if let Some(previous) = &staging_texture {
+                assert_eq!(texture, previous);
+            }
+            staging_texture = Some(texture.clone());
+        }
+
+        let original = vec![127; 13 * 9 * 4];
+        let source = source_texture(&readback.device, 13, 9, &original)?;
+        readback.gpu_scaling_supported = false;
+        assert_eq!(
+            readback.copy_for_output(&source, 13, 9, &mut pixels)?,
+            (13, 9)
+        );
+        assert_eq!(pixels, original);
+        Ok(())
+    }
+
+    #[test]
+    fn ffmpeg_audio_queue_error_can_retry_but_hls_write_error_cannot() {
+        let audio_log = "[af#0:0 @ x] Error sending frames to consumers: No space left on device";
+        let file_log = "[hls @ x] Failed to open file: No space left on device";
+        assert!(audio_buffer_failed(audio_log));
+        assert!(!audio_buffer_failed(file_log));
+        assert!(!audio_buffer_failed(&format!("{file_log}\n{audio_log}")));
+    }
+
+    #[test]
+    fn silent_capture_ignores_stale_microphone_flags() {
+        let settings = AppSettings {
+            audio_device: "unused loopback".into(),
+            ..AppSettings::default()
+        };
+        let stream = StreamAudioConfig {
+            audio_mode: "silent".into(),
+            enable_microphone: true,
+            microphone_device: "unused microphone".into(),
+            ..StreamAudioConfig::default()
+        };
+        let (audio, notice) = resolve_audio(&settings, stream);
+        assert!(!audio.enabled && !audio.microphone_enabled);
+        assert!(notice.is_none());
+    }
 
     #[test]
     fn synthetic_frames_generate_hls_over_http_and_stop() {
@@ -642,8 +998,10 @@ mod tests {
             });
             let deadline = Instant::now() + Duration::from_secs(12);
             let mut ready = false;
+            let mut published = false;
             while Instant::now() < deadline && !writer.is_finished() {
-                if hls.playlist_is_ready() && playlist_is_served(port, &route) {
+                published |= encoder.publish_playlist()?;
+                if published && playlist_is_served(port, &route) {
                     ready = true;
                     break;
                 }
@@ -654,12 +1012,66 @@ mod tests {
             encoder.stop()?;
             let _ = writer.join().map_err(|_| "Video writer panicked")?;
             if !ready {
-                return Err(encoder_error(&hls, "HLS não ficou disponível no teste.").into());
+                return Err(encoder_error(
+                    encoder.log_path(),
+                    "HLS não ficou disponível no teste.",
+                )
+                .into());
             }
             assert!(encoder.try_wait()?.is_some());
             Ok(())
         })();
         std::fs::remove_dir_all(directory).unwrap();
         result.unwrap();
+    }
+
+    #[test]
+    fn slow_video_input_keeps_wall_clock_duration() -> Result<(), CaptureError> {
+        let directory =
+            std::env::temp_dir().join(format!("hipocast-clock-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory)?;
+        let result = (|| -> Result<bool, CaptureError> {
+            let settings = AppSettings {
+                width: 160,
+                height: 90,
+                framerate: 30,
+                enable_hw_accel: false,
+                ..AppSettings::default()
+            };
+            let hls = HlsConfig::new(&directory.to_string_lossy(), "slow", 3, 0.5);
+            let mut encoder = FfmpegEncoder::new(&settings, AudioConfig::default(), &hls)?;
+            let mut input = encoder.take_input().ok_or("FFmpeg stdin unavailable")?;
+            let pixels = vec![127; (settings.width * settings.height * 4) as usize];
+            let start = Instant::now();
+            for index in 0..14 {
+                let at = start + Duration::from_millis(100 * index);
+                thread::sleep(at.saturating_duration_since(Instant::now()));
+                input.write_all(&pixels)?;
+            }
+            drop(input);
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < deadline && encoder.try_wait()?.is_none() {
+                thread::sleep(Duration::from_millis(10));
+            }
+            encoder.publish_playlist()?;
+            let playlist = std::fs::read_to_string(hls.playlist_path())?;
+            let duration: f64 = playlist
+                .lines()
+                .filter_map(|line| {
+                    line.strip_prefix("#EXTINF:")?
+                        .split(',')
+                        .next()?
+                        .parse::<f64>()
+                        .ok()
+                })
+                .sum();
+            Ok(duration > 0.9)
+        })();
+        std::fs::remove_dir_all(directory)?;
+        assert!(
+            result?,
+            "14 frames at 10 FPS must not be compressed to the nominal 30 FPS timeline"
+        );
+        Ok(())
     }
 }

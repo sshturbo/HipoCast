@@ -3,6 +3,7 @@ mod commands;
 mod db;
 mod encoder;
 mod ffmpeg;
+mod gpu_scale;
 mod logger;
 mod output;
 mod server;
