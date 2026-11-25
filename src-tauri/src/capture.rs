@@ -1,12 +1,26 @@
-use crate::db::Database;
+use crate::encoder::{enumerate_audio_devices, AudioConfig};
+use crate::ffmpeg::FfmpegEncoder;
+use crate::output::HlsConfig;
+use crate::stream_config::StreamAudioConfig;
+use crate::AppSettings;
 use fast_image_resize::{images::Image, PixelType, ResizeAlg, ResizeOptions, Resizer};
-use serde::{Deserialize, Serialize};
-use std::num::NonZeroU32;
-use std::sync::atomic::{AtomicBool, Ordering};
+use serde::Serialize;
+use std::io::{Read, Seek, SeekFrom, Write};
+use std::process::ChildStdin;
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
+use windows::Win32::Graphics::{
+    Direct3D11::{
+        ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, D3D11_CPU_ACCESS_READ,
+        D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
+    },
+    Dxgi::Common::{DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_SAMPLE_DESC},
+};
 use windows_capture::{
     capture::{CaptureControl, Context, GraphicsCaptureApiHandler},
     frame::Frame,
-    graphics_capture_api::InternalCaptureControl,
+    graphics_capture_api::{GraphicsCaptureApi, InternalCaptureControl},
     monitor::Monitor,
     settings::{
         ColorFormat, CursorCaptureSettings, DirtyRegionSettings, DrawBorderSettings,
@@ -15,732 +29,637 @@ use windows_capture::{
     window::Window,
 };
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+type CaptureError = Box<dyn std::error::Error + Send + Sync>;
+
+#[derive(Serialize)]
 pub struct CaptureSource {
     pub id: String,
     pub title: String,
-    pub source_type: String,
+    pub source_type: &'static str,
 }
 
 pub fn list_windows() -> Vec<CaptureSource> {
     let mut sources = Vec::new();
-
-    // List Monitors
     for monitor in Monitor::enumerate().unwrap_or_default() {
         if let Ok(index) = monitor.index() {
             sources.push(CaptureSource {
-                id: format!("monitor:{}", index),
-                title: format!("Monitor {}", index),
-                source_type: "monitor".to_string(),
+                id: format!("monitor:{index}"),
+                title: format!("Monitor {index}"),
+                source_type: "monitor",
             });
         }
     }
-
-    // List Windows
     for window in Window::enumerate().unwrap_or_default() {
         if let Ok(title) = window.title() {
             if !title.is_empty() {
                 sources.push(CaptureSource {
                     id: format!("window:{}", window.as_raw_hwnd() as usize),
                     title,
-                    source_type: "window".to_string(),
+                    source_type: "window",
                 });
             }
         }
     }
-
     sources
 }
 
-use std::sync::mpsc::{channel, Sender};
-use std::thread;
-
-#[derive(Clone)]
-pub struct FrameData {
-    pub data: Vec<u8>,
-    pub width: u32,
-    pub height: u32,
+struct FrameData {
+    data: Vec<u8>,
+    width: u32,
+    height: u32,
 }
 
-// Wrapper to hold capture control + stop signal
+#[derive(Default)]
+struct FrameState {
+    latest: Option<FrameData>,
+    spare_pixels: Vec<u8>,
+    stopping: bool,
+    source_closed: bool,
+}
+
+impl FrameState {
+    fn recycle_pixels(&mut self, pixels: Vec<u8>) {
+        if pixels.capacity() > self.spare_pixels.capacity() {
+            self.spare_pixels = pixels;
+        }
+    }
+}
+
+#[derive(Default)]
+struct Frames {
+    state: Mutex<FrameState>,
+    available: Condvar,
+}
+
+impl Frames {
+    fn close(&self) {
+        self.state.lock().unwrap().stopping = true;
+        self.available.notify_all();
+    }
+}
+
 pub struct CaptureHandle {
-    _control: CaptureControl<CaptureHandler, Box<dyn std::error::Error + Send + Sync>>,
-    pub stop_signal: Arc<AtomicBool>,
+    frames: Arc<Frames>,
+    worker: Option<JoinHandle<()>>,
+}
+
+impl CaptureHandle {
+    pub fn is_finished(&self) -> bool {
+        self.worker.as_ref().is_none_or(JoinHandle::is_finished)
+    }
+
+    pub fn stop(&mut self) {
+        self.frames.close();
+        if let Some(worker) = self.worker.take() {
+            if worker.join().is_err() {
+                tracing::error!("A thread de captura terminou inesperadamente");
+            }
+        }
+    }
 }
 
 impl Drop for CaptureHandle {
     fn drop(&mut self) {
-        tracing::info!("🛑 CaptureHandle dropped, sending stop signal...");
-        self.stop_signal.store(true, Ordering::Relaxed);
+        self.stop();
     }
 }
 
-pub struct CaptureHandler {
-    sender: Sender<FrameData>,
+struct CaptureFlags {
+    frames: Arc<Frames>,
+    interval: Duration,
+}
+
+struct CaptureHandler {
+    frames: Arc<Frames>,
+    interval: Duration,
+    next_frame: Option<Instant>,
+    readback: FrameReadback,
 }
 
 impl GraphicsCaptureApiHandler for CaptureHandler {
-    type Flags = Sender<FrameData>;
-    type Error = Box<dyn std::error::Error + Send + Sync>;
+    type Flags = CaptureFlags;
+    type Error = CaptureError;
+
+    fn new(ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
+        Ok(Self {
+            frames: ctx.flags.frames,
+            interval: ctx.flags.interval,
+            next_frame: None,
+            readback: FrameReadback {
+                device: ctx.device,
+                context: ctx.device_context,
+                texture: None,
+            },
+        })
+    }
 
     fn on_frame_arrived(
         &mut self,
         frame: &mut Frame,
-        _capture_control: InternalCaptureControl,
+        control: InternalCaptureControl,
     ) -> Result<(), Self::Error> {
-        // Log only first frame to avoid flooding
-        static LOGGED_FIRST_FRAME: std::sync::atomic::AtomicBool =
-            std::sync::atomic::AtomicBool::new(false);
-        if !LOGGED_FIRST_FRAME.swap(true, std::sync::atomic::Ordering::Relaxed) {
-            tracing::info!("📸 First frame arrived from Windows Capture API");
-        }
-
-        let width = frame.width();
-        let height = frame.height();
-        let mut frame_buffer = frame.buffer()?;
-        let data = frame_buffer.as_raw_buffer();
-
-        // Handle Stride (Row Pitch): data from API might have padding at the end of each row.
-        // We copy only the actual pixel data (width * 4) for each row.
-        let row_size = (width * 4) as usize;
-        let expected_total_len = row_size * (height as usize);
-
-        // Defensive Check: Ensure data length is consistent with height and stride
-        // prevents STATUS_STACK_BUFFER_OVERRUN during resolution transitions
-        if data.len() < expected_total_len {
-            tracing::warn!(
-                "⚠️ Frame data too small! Expected {}, got {}. Skipping corrupt frame.",
-                expected_total_len,
-                data.len()
-            );
-            return Ok(());
-        }
-
-        let stride = data.len() / (height as usize);
-        let mut buffer = Vec::with_capacity(expected_total_len);
-
-        for y in 0..height as usize {
-            let start = y * stride;
-            let end = start + row_size;
-            if end <= data.len() {
-                buffer.extend_from_slice(&data[start..end]);
+        let (width, height) = (frame.width(), frame.height());
+        let mut pixels = {
+            let mut state = self.frames.state.lock().unwrap();
+            if state.stopping {
+                control.stop();
+                return Ok(());
             }
+            if width == 0 || height == 0 || !accept_frame(&mut self.next_frame, Instant::now(), self.interval) {
+                return Ok(());
+            }
+            std::mem::take(&mut state.spare_pixels)
+        };
+        // The capture callback owns the frame for the duration of this copy.
+        self.readback.copy(unsafe { frame.as_raw_texture() }, width, height, &mut pixels)?;
+        let mut state = self.frames.state.lock().unwrap();
+        if let Some(skipped) = state.latest.replace(FrameData { data: pixels, width, height }) {
+            state.recycle_pixels(skipped.data);
         }
-
-        let _ = self.sender.send(FrameData {
-            data: buffer,
-            width,
-            height,
-        });
-
+        self.frames.available.notify_one();
         Ok(())
     }
 
     fn on_closed(&mut self) -> Result<(), Self::Error> {
-        tracing::warn!(
-            "⚠️ CaptureHandler::on_closed called! Windows Capture session ended unexpectedly."
-        );
+        self.frames.state.lock().unwrap().source_closed = true;
+        self.frames.available.notify_all();
         Ok(())
     }
+}
 
-    fn new(ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
-        tracing::info!("🆕 CaptureHandler initialized (Capture Session Started)");
-        Ok(Self { sender: ctx.flags })
+fn accept_frame(next_frame: &mut Option<Instant>, now: Instant, interval: Duration) -> bool {
+    if let Some(deadline) = *next_frame {
+        // Preserve the sampling cadence when the display frame arrives slightly early.
+        if now + interval / 8 < deadline {
+            return false;
+        }
+        *next_frame = Some((deadline + interval).max(now + interval / 2));
+    } else {
+        *next_frame = Some(now + interval);
+    }
+    true
+}
+
+struct FrameReadback {
+    device: ID3D11Device,
+    context: ID3D11DeviceContext,
+    texture: Option<(u32, u32, ID3D11Texture2D)>,
+}
+
+impl FrameReadback {
+    fn copy(
+        &mut self,
+        source: &ID3D11Texture2D,
+        width: u32,
+        height: u32,
+        pixels: &mut Vec<u8>,
+    ) -> Result<(), CaptureError> {
+        if self.texture.as_ref().is_none_or(|(w, h, _)| (*w, *h) != (width, height)) {
+            let desc = D3D11_TEXTURE2D_DESC {
+                Width: width,
+                Height: height,
+                MipLevels: 1,
+                ArraySize: 1,
+                Format: DXGI_FORMAT_R8G8B8A8_UNORM,
+                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                Usage: D3D11_USAGE_STAGING,
+                CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+                ..Default::default()
+            };
+            let mut texture = None;
+            unsafe { self.device.CreateTexture2D(&desc, None, Some(&mut texture))? };
+            self.texture = Some((width, height, texture.ok_or("Direct3D não criou a textura de leitura.")?));
+        }
+        let (_, _, texture) = self.texture.as_ref().unwrap();
+        let mut mapped = MappedFrame {
+            context: &self.context,
+            texture,
+            data: D3D11_MAPPED_SUBRESOURCE::default(),
+        };
+        // Both textures belong to the capture device and use the session's RGBA8 format.
+        unsafe {
+            self.context.CopyResource(texture, source);
+            self.context.Map(texture, 0, D3D11_MAP_READ, 0, Some(&mut mapped.data))?;
+        }
+
+        let row_size = width as usize * 4;
+        let stride = mapped.data.RowPitch as usize;
+        let data = mapped.data.pData.cast::<u8>();
+        if data.is_null() || stride < row_size {
+            return Err("O Direct3D retornou uma imagem inválida.".into());
+        }
+        let size = row_size * height as usize;
+        pixels.clear();
+        pixels.reserve(size);
+        if stride == row_size {
+            pixels.extend_from_slice(unsafe { std::slice::from_raw_parts(data, size) });
+        } else {
+            for row in 0..height as usize {
+                pixels.extend_from_slice(unsafe { std::slice::from_raw_parts(data.add(row * stride), row_size) });
+            }
+        }
+        Ok(())
     }
 }
 
-use crate::ffmpeg::FfmpegEncoder;
-use crate::AppSettings;
-use std::sync::Arc;
+struct MappedFrame<'a> {
+    context: &'a ID3D11DeviceContext,
+    texture: &'a ID3D11Texture2D,
+    data: D3D11_MAPPED_SUBRESOURCE,
+}
+
+impl Drop for MappedFrame<'_> {
+    fn drop(&mut self) {
+        if !self.data.pData.is_null() {
+            unsafe { self.context.Unmap(self.texture, 0) };
+        }
+    }
+}
 
 pub fn start_capture(
-    _app: tauri::AppHandle,
-    id: String,
-    output_dir: String,
-    settings_config: AppSettings,
-    db: Arc<Database>,
-) -> Result<CaptureHandle, Box<dyn std::error::Error + Send + Sync>> {
-    let (tx, rx) = channel::<FrameData>();
-    let stream_id = id.clone().replace(":", "_");
-    let output_dir_clone = output_dir.clone();
-
-    // Flag to signal thread stop
-    let should_stop = Arc::new(AtomicBool::new(false));
-    let should_stop_clone = should_stop.clone();
-
-    // Spawn thread to handle FFmpeg HLS encoding
-    thread::spawn(move || {
-        tracing::info!("🎬 FFmpeg thread started for stream: {}", stream_id);
-        let mut ffmpeg: Option<FfmpegEncoder> = None;
-        let mut last_frame_time = std::time::Instant::now();
-        let frame_interval =
-            std::time::Duration::from_secs_f64(1.0 / settings_config.framerate as f64);
-
-        let mut last_valid_frame: Option<FrameData> = None;
-
-        loop {
-            // Check stop signal first
-            if should_stop_clone.load(Ordering::Relaxed) {
-                tracing::info!("🛑 Stop signal received. Stopping FFmpeg thread...");
-                tracing::info!("✅ FFmpeg thread finished successfully (stop signal)");
-                break;
+    source_id: String,
+    settings: AppSettings,
+    stream_audio: StreamAudioConfig,
+    hls: HlsConfig,
+    hls_port: u16,
+    update: impl Fn(&'static str, Option<String>) + Send + 'static,
+) -> std::io::Result<CaptureHandle> {
+    let frames = Arc::new(Frames::default());
+    let worker_frames = frames.clone();
+    let worker = thread::Builder::new()
+        .name("hipocast-capture".into())
+        .spawn(move || {
+            let result = run_capture(
+                &source_id,
+                &settings,
+                stream_audio,
+                &hls,
+                hls_port,
+                &worker_frames,
+                &update,
+            );
+            if let Err(error) = result {
+                tracing::error!(stream = hls.stream_id(), %error, "Falha na captura");
+                update("failed", Some(error));
             }
-
-            // 1. DRAIN CHANNEL: Only process the LATEST frame to prevent memory backlog (OOM)
-            let mut latest_frame = None;
-            let mut disconnected = false;
-            loop {
-                match rx.try_recv() {
-                    Ok(frame) => latest_frame = Some(frame),
-                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                        disconnected = true;
-                        break;
-                    }
-                }
-            }
-
-            if disconnected {
-                tracing::warn!("🔌 Channel disconnected. Stopping FFmpeg thread...");
-                tracing::info!("✅ FFmpeg thread finished successfully (channel disconnect)");
-                break; // FFmpeg será dropado automaticamente
-            }
-
-            if let Some(frame) = latest_frame {
-                let start_process = std::time::Instant::now();
-                // Initialize FFmpeg with Dynamic Canvas Resolution from Settings
-                let canvas_width = settings_config.width;
-                let canvas_height = settings_config.height;
-
-                if ffmpeg.is_none() {
-                    // Load stream-specific audio config
-                    let stream_audio_config = db.get_stream_audio_config(&stream_id).ok().flatten();
-
-                    let (
-                        enable_audio,
-                        enable_microphone,
-                        microphone_device,
-                        _target_pid,
-                        audio_filters,
-                        microphone_filters,
-                    ) = if let Some(config) = stream_audio_config {
-                        // Use stream-specific config
-                        let enable_audio = config.audio_mode != "muted";
-                        let target_pid = if config.audio_mode == "process" {
-                            config.target_pid
-                        } else {
-                            None
-                        };
-                        let audio_filters = config.audio_effects.to_ffmpeg_filter();
-                        let microphone_filters = config.microphone_effects.to_ffmpeg_filter();
-                        (
-                            enable_audio,
-                            config.enable_microphone,
-                            config.microphone_device.clone(),
-                            target_pid,
-                            audio_filters,
-                            microphone_filters,
-                        )
-                    } else {
-                        // Fallback to global settings
-                        (
-                            settings_config.enable_audio,
-                            settings_config.enable_microphone,
-                            settings_config.microphone_device.clone(),
-                            None,
-                            String::new(),
-                            String::new(),
-                        )
-                    };
-
-                    match FfmpegEncoder::new(
-                        canvas_width,
-                        canvas_height,
-                        settings_config.framerate,
-                        settings_config.bitrate,
-                        settings_config.hls_list_size,
-                        settings_config.hls_time,
-                        &output_dir_clone,
-                        &stream_id,
-                        settings_config.enable_hw_accel,
-                        settings_config.ffmpeg_preset.clone(),
-                        settings_config.gpu_preset.clone(),
-                        enable_audio,
-                        enable_microphone,
-                        settings_config.audio_bitrate,
-                        settings_config.audio_buffer_size,
-                        settings_config.audio_offset,
-                        settings_config.audio_device.clone(),
-                        microphone_device,
-                        audio_filters,
-                        microphone_filters,
-                    ) {
-                        Ok(enc) => {
-                            ffmpeg = Some(enc);
-                            last_frame_time = std::time::Instant::now(); // Reset on first frame
-                            tracing::info!(
-                                "Capture initialized with Canvas at {}x{}",
-                                canvas_width,
-                                canvas_height
-                            );
-                        }
-                        Err(e) => {
-                            tracing::error!("Failed to start FFmpeg: {:?}", e);
-                            continue;
-                        }
-                    }
-                }
-
-                // PROCESS FRAME: Scale if dimensions don't match Dynamic Canvas
-                let canvas_width = settings_config.width;
-                let canvas_height = settings_config.height;
-
-                // Destructure to take ownership of fields to avoid partial move issues
-                let FrameData {
-                    data,
-                    width,
-                    height,
-                } = frame;
-
-                if width != canvas_width || height != canvas_height {
-                    // Optimized scaling using fast_image_resize
-                    let src_width = NonZeroU32::new(width).unwrap();
-                    let src_height = NonZeroU32::new(height).unwrap();
-                    let dst_width = NonZeroU32::new(canvas_width).unwrap();
-                    let dst_height = NonZeroU32::new(canvas_height).unwrap();
-
-                    let src_image = Image::from_vec_u8(
-                        src_width.get(),
-                        src_height.get(),
-                        data,
-                        PixelType::U8x4,
-                    )
-                    .unwrap();
-
-                    let mut dst_image =
-                        Image::new(dst_width.get(), dst_height.get(), PixelType::U8x4);
-
-                    let mut resizer = Resizer::new();
-                    let options = ResizeOptions::new().resize_alg(ResizeAlg::Nearest);
-
-                    if let Err(e) = resizer.resize(&src_image, &mut dst_image, &options) {
-                        tracing::warn!("Resize failed: {:?}", e);
-                        continue;
-                    }
-
-                    last_valid_frame = Some(FrameData {
-                        data: dst_image.into_vec(),
-                        width: canvas_width,
-                        height: canvas_height,
-                    });
-                } else {
-                    last_valid_frame = Some(FrameData {
-                        data,
-                        width,
-                        height,
-                    });
-                }
-
-                // Performance Monitor: Alert if scaling is too slow for 60fps
-                let elapsed = start_process.elapsed();
-                if elapsed > frame_interval {
-                    tracing::warn!(
-                        "⚠️ Warning: Scaling lag detected! Processing took {:?}, limit is {:?}",
-                        elapsed,
-                        frame_interval
-                    );
-                }
-
-                // If we were idle for too long, reset pacer to current time
-                if last_frame_time.elapsed() > std::time::Duration::from_secs(1) {
-                    last_frame_time = std::time::Instant::now();
-                }
-            }
-
-            // 2. Check if it's time to send a frame (CFR Logic)
-            if let Some(frame) = &last_valid_frame {
-                let mut catchup_limit = 5; // Max 5 frames catch-up per loop to prevent huge bursts
-                while last_frame_time.elapsed() >= frame_interval && catchup_limit > 0 {
-                    if let Some(enc) = ffmpeg.as_mut() {
-                        // Crucial: write_frame already checks for size mismatch and returns error
-                        // We handle the error here to skip bad frames instead of crashing the thread
-                        if let Err(e) = enc.write_frame(&frame.data) {
-                            // Check for Broken Pipe (OS Error 232 on Windows) which means FFmpeg was killed/stopped
-                            // We need to try to downcast to io::Error because write_frame returns Box<dyn Error>
-                            let is_pipe_closed =
-                                if let Some(io_err) = e.downcast_ref::<std::io::Error>() {
-                                    if let Some(os_err) = io_err.raw_os_error() {
-                                        os_err == 232 || os_err == 109
-                                    } else {
-                                        io_err.kind() == std::io::ErrorKind::BrokenPipe
-                                    }
-                                } else {
-                                    false
-                                };
-
-                            if is_pipe_closed {
-                                // Silent exit
-                                break;
-                            } else {
-                                tracing::warn!("Frame skip: size mismatch or error: {}", e);
-                            }
-                        }
-                    }
-
-                    // Advance time by EXACTLY one frame interval to prevent drift
-                    last_frame_time += frame_interval;
-                    catchup_limit -= 1;
-                }
-
-                // If we are still too far behind, skip time to prevent permanent lag
-                if last_frame_time.elapsed() > std::time::Duration::from_secs(1) {
-                    last_frame_time = std::time::Instant::now();
-                }
-            }
-
-            // Sleep tiny amount to prevent CPU spinning
-            thread::sleep(std::time::Duration::from_micros(100)); // 0.1ms precision
-        }
-
-        // Cleanup is automatic via Drop
-    });
-
-    let control = if id.starts_with("monitor:") {
-        let target_index = id.strip_prefix("monitor:").unwrap().parse::<usize>()?;
-        let monitors = Monitor::enumerate()?;
-
-        // Find monitor by its actual index, not position in array
-        let monitor = monitors
-            .iter()
-            .find(|m| m.index().ok() == Some(target_index))
-            .or_else(|| monitors.get(target_index))
-            .ok_or("Monitor not found")?;
-
-        let settings = Settings::new(
-            *monitor,
-            CursorCaptureSettings::Default,
-            DrawBorderSettings::WithoutBorder,
-            SecondaryWindowSettings::Default,
-            MinimumUpdateIntervalSettings::Default,
-            DirtyRegionSettings::Default,
-            ColorFormat::Rgba8,
-            tx,
-        );
-        CaptureHandler::start_free_threaded(settings)?
-    } else if id.starts_with("window:") {
-        let hwnd = id.strip_prefix("window:").unwrap().parse::<usize>()?;
-        let window = Window::from_raw_hwnd(hwnd as _);
-
-        let settings = Settings::new(
-            window,
-            CursorCaptureSettings::Default,
-            DrawBorderSettings::WithoutBorder,
-            SecondaryWindowSettings::Default,
-            MinimumUpdateIntervalSettings::Default,
-            DirtyRegionSettings::Default,
-            ColorFormat::Rgba8,
-            tx,
-        );
-        CaptureHandler::start_free_threaded(settings)?
-    } else {
-        return Err("Invalid source ID".into());
-    };
-
+        })?;
     Ok(CaptureHandle {
-        _control: control,
-        stop_signal: should_stop,
+        frames,
+        worker: Some(worker),
     })
 }
 
-// Version for browser streams that separates stream_id (for folders) from capture_id (for actual capture)
-pub fn start_capture_with_ids(
-    _app: tauri::AppHandle,
-    stream_id: String,  // Custom ID for folders/files (what user sees)
-    capture_id: String, // Real window ID for capture (window:HWND)
-    output_dir: String,
-    settings_config: AppSettings,
-    db: Arc<Database>,
-) -> Result<CaptureHandle, Box<dyn std::error::Error + Send + Sync>> {
-    let (tx, rx) = channel::<FrameData>();
-    let stream_id_sanitized = stream_id.clone().replace(":", "_");
-    let output_dir_clone = output_dir.clone();
+fn run_capture(
+    source_id: &str,
+    settings: &AppSettings,
+    stream_audio: StreamAudioConfig,
+    hls: &HlsConfig,
+    hls_port: u16,
+    frames: &Arc<Frames>,
+    update: &impl Fn(&'static str, Option<String>),
+) -> Result<(), String> {
+    let (audio, notice) = resolve_audio(settings, stream_audio);
+    if frames.state.lock().unwrap().stopping {
+        return Ok(());
+    }
+    update("starting", notice.clone());
 
-    // Flag to signal thread stop
-    let should_stop = Arc::new(AtomicBool::new(false));
-    let should_stop_clone = should_stop.clone();
+    let mut encoder = FfmpegEncoder::new(settings, audio, hls)
+        .map_err(|error| format!("Não foi possível iniciar o FFmpeg: {error}"))?;
+    let input = encoder
+        .take_input()
+        .ok_or("O FFmpeg não disponibilizou a entrada de vídeo.")?;
+    if frames.state.lock().unwrap().stopping {
+        return Ok(());
+    }
+    let capture = start_source(source_id, frames.clone(), settings.framerate)
+        .map_err(|error| format!("Não foi possível abrir a fonte de captura: {error}"))?;
 
-    // Spawn thread to handle FFmpeg HLS encoding (same as start_capture but uses stream_id for folders)
-    thread::spawn(move || {
-        tracing::info!(
-            "🎬 FFmpeg thread started for browser stream: {}",
-            stream_id_sanitized
-        );
-        let mut ffmpeg: Option<FfmpegEncoder> = None;
-        let mut last_frame_time = std::time::Instant::now();
-        let frame_interval =
-            std::time::Duration::from_secs_f64(1.0 / settings_config.framerate as f64);
+    let writer_frames = frames.clone();
+    let (width, height, framerate) = (settings.width, settings.height, settings.framerate);
+    let writer =
+        thread::spawn(move || write_frames(input, &writer_frames, width, height, framerate));
 
-        let mut last_valid_frame: Option<FrameData> = None;
+    let playlist = hls.playlist_path();
+    let route = hls.playlist_route();
+    let timeout = Duration::from_secs_f64(12.0 + settings.hls_time * 2.0);
+    let mut last_progress = Instant::now();
+    let mut last_modified = None;
+    let mut ready = false;
 
-        loop {
-            // Check stop signal first
-            if should_stop_clone.load(Ordering::Relaxed) {
-                tracing::info!(
-                    "🛑 Stop signal received. Stopping FFmpeg thread (browser stream)..."
-                );
-                tracing::info!("✅ FFmpeg thread finished successfully (stop signal)");
-                break;
-            }
-
-            // 1. DRAIN CHANNEL: Only process the LATEST frame to prevent memory backlog (OOM)
-            let mut latest_frame = None;
-            let mut disconnected = false;
-            loop {
-                match rx.try_recv() {
-                    Ok(frame) => latest_frame = Some(frame),
-                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                        disconnected = true;
-                        break;
-                    }
-                }
-            }
-
-            if disconnected {
-                tracing::warn!(
-                    "🔌 Channel disconnected. Stopping FFmpeg thread (browser stream)..."
-                );
-                tracing::info!("✅ FFmpeg thread finished successfully (channel disconnect)");
-                break; // FFmpeg será dropado automaticamente
-            }
-
-            if let Some(frame) = latest_frame {
-                let start_process = std::time::Instant::now();
-                // Initialize FFmpeg with Dynamic Canvas Resolution from Settings
-                let canvas_width = settings_config.width;
-                let canvas_height = settings_config.height;
-
-                if ffmpeg.is_none() {
-                    // Load stream-specific audio config (use stream_id_sanitized)
-                    let stream_audio_config = db
-                        .get_stream_audio_config(&stream_id_sanitized)
-                        .ok()
-                        .flatten();
-
-                    let (
-                        enable_audio,
-                        enable_microphone,
-                        microphone_device,
-                        _target_pid,
-                        audio_filters,
-                        microphone_filters,
-                    ) = if let Some(config) = stream_audio_config {
-                        // Use stream-specific config
-                        let enable_audio = config.audio_mode != "muted";
-                        let target_pid = if config.audio_mode == "process" {
-                            config.target_pid
-                        } else {
-                            None
-                        };
-
-                        let audio_filters = config.audio_effects.to_ffmpeg_filter();
-                        let microphone_filters = config.microphone_effects.to_ffmpeg_filter();
-                        (
-                            enable_audio,
-                            config.enable_microphone,
-                            config.microphone_device.clone(),
-                            target_pid,
-                            audio_filters,
-                            microphone_filters,
-                        )
-                    } else {
-                        // Fallback to global settings
-                        (
-                            settings_config.enable_audio,
-                            settings_config.enable_microphone,
-                            settings_config.microphone_device.clone(),
-                            None,
-                            String::new(),
-                            String::new(),
-                        )
-                    };
-
-                    match FfmpegEncoder::new(
-                        canvas_width,
-                        canvas_height,
-                        settings_config.framerate,
-                        settings_config.bitrate,
-                        settings_config.hls_list_size,
-                        settings_config.hls_time,
-                        &output_dir_clone,
-                        &stream_id_sanitized, // Use custom stream_id for folders
-                        settings_config.enable_hw_accel,
-                        settings_config.ffmpeg_preset.clone(),
-                        settings_config.gpu_preset.clone(),
-                        enable_audio,
-                        enable_microphone,
-                        settings_config.audio_bitrate,
-                        settings_config.audio_buffer_size,
-                        settings_config.audio_offset,
-                        settings_config.audio_device.clone(),
-                        microphone_device,
-                        audio_filters,
-                        microphone_filters,
-                    ) {
-                        Ok(enc) => {
-                            ffmpeg = Some(enc);
-                            last_frame_time = std::time::Instant::now(); // Reset on first frame
-                            println!(
-                                "Capture initialized with Canvas at {}x{} for stream '{}'",
-                                canvas_width, canvas_height, stream_id_sanitized
-                            );
-                        }
-                        Err(e) => {
-                            tracing::error!("Failed to start FFmpeg: {:?}", e);
-                            continue;
-                        }
-                    }
-                }
-
-                // PROCESS FRAME: Scale if dimensions don't match Dynamic Canvas
-                let canvas_width = settings_config.width;
-                let canvas_height = settings_config.height;
-
-                // Destructure to take ownership of fields to avoid partial move issues
-                let FrameData {
-                    data,
-                    width,
-                    height,
-                } = frame;
-
-                if width != canvas_width || height != canvas_height {
-                    // Optimized scaling using fast_image_resize
-                    let src_width = NonZeroU32::new(width).unwrap();
-                    let src_height = NonZeroU32::new(height).unwrap();
-                    let dst_width = NonZeroU32::new(canvas_width).unwrap();
-                    let dst_height = NonZeroU32::new(canvas_height).unwrap();
-
-                    let src_image = Image::from_vec_u8(
-                        src_width.get(),
-                        src_height.get(),
-                        data,
-                        PixelType::U8x4,
-                    )
-                    .unwrap();
-
-                    let mut dst_image =
-                        Image::new(dst_width.get(), dst_height.get(), PixelType::U8x4);
-
-                    let mut resizer = Resizer::new();
-                    let options = ResizeOptions::new().resize_alg(ResizeAlg::Nearest);
-
-                    if let Err(e) = resizer.resize(&src_image, &mut dst_image, &options) {
-                        tracing::warn!("Resize failed: {:?}", e);
-                        continue;
-                    }
-
-                    last_valid_frame = Some(FrameData {
-                        data: dst_image.into_vec(),
-                        width: canvas_width,
-                        height: canvas_height,
-                    });
-                } else {
-                    last_valid_frame = Some(FrameData {
-                        data,
-                        width,
-                        height,
-                    });
-                }
-
-                // ENCODE FRAME if available
-                if let (Some(enc), Some(valid_frame)) = (ffmpeg.as_mut(), &last_valid_frame) {
-                    if let Err(e) = enc.write_frame(&valid_frame.data) {
-                        tracing::error!("FFmpeg encode error: {:?}", e);
-                    }
-                }
-
-                let elapsed_process = start_process.elapsed();
-
-                if elapsed_process > frame_interval.mul_f32(0.8) {
-                    tracing::warn!(
-                        "⚠️ Frame processing took {:?} (limit: {:?}). Risk of frame drop.",
-                        elapsed_process,
-                        frame_interval
-                    );
-                }
-            } else if last_valid_frame.is_some() {
-                // No new frame but we have a valid one cached
-                if let (Some(enc), Some(valid_frame)) = (ffmpeg.as_mut(), &last_valid_frame) {
-                    if let Err(e) = enc.write_frame(&valid_frame.data) {
-                        tracing::error!("FFmpeg encode error (cached): {:?}", e);
-                    }
-                }
-            }
-
-            // 2. SLEEP to target framerate (but also prevent CPU busy-wait)
-            let elapsed_total = last_frame_time.elapsed();
-            if elapsed_total < frame_interval {
-                thread::sleep(frame_interval - elapsed_total);
-            }
-            last_frame_time = std::time::Instant::now();
-
-            // Micro-sleep for responsiveness
-            thread::sleep(std::time::Duration::from_micros(100)); // 0.1ms precision
+    let outcome = loop {
+        let (stopping, source_closed) = {
+            let state = frames.state.lock().unwrap();
+            (state.stopping, state.source_closed)
+        };
+        if stopping {
+            break Ok(());
         }
-
-        // Cleanup is automatic via Drop
-    });
-
-    // Use capture_id for the actual capture (window:HWND)
-    let control = if capture_id.starts_with("monitor:") {
-        let target_index = capture_id
-            .strip_prefix("monitor:")
-            .unwrap()
-            .parse::<usize>()?;
-        let monitors = Monitor::enumerate()?;
-
-        // Find monitor by its actual index, not position in array
-        let monitor = monitors
-            .iter()
-            .find(|m| m.index().ok() == Some(target_index))
-            .or_else(|| monitors.get(target_index))
-            .ok_or("Monitor not found")?;
-
-        let settings = Settings::new(
-            *monitor,
-            CursorCaptureSettings::Default,
-            DrawBorderSettings::WithoutBorder,
-            SecondaryWindowSettings::Default,
-            MinimumUpdateIntervalSettings::Default,
-            DirtyRegionSettings::Default,
-            ColorFormat::Rgba8,
-            tx,
-        );
-        CaptureHandler::start_free_threaded(settings)?
-    } else if capture_id.starts_with("window:") {
-        let hwnd = capture_id
-            .strip_prefix("window:")
-            .unwrap()
-            .parse::<usize>()?;
-        let window = Window::from_raw_hwnd(hwnd as _);
-
-        let settings = Settings::new(
-            window,
-            CursorCaptureSettings::Default,
-            DrawBorderSettings::WithoutBorder,
-            SecondaryWindowSettings::Default,
-            MinimumUpdateIntervalSettings::Default,
-            DirtyRegionSettings::Default,
-            ColorFormat::Rgba8,
-            tx,
-        );
-        CaptureHandler::start_free_threaded(settings)?
-    } else {
-        return Err("Invalid capture ID".into());
+        if source_closed || capture.is_finished() {
+            break Err(
+                "A fonte de captura foi fechada. Selecione a janela ou monitor novamente.".into(),
+            );
+        }
+        match encoder.try_wait() {
+            Ok(Some(status)) => {
+                break Err(encoder_error(
+                    hls,
+                    &format!("O FFmpeg encerrou ({status})."),
+                ));
+            }
+            Err(error) => break Err(format!("Falha ao verificar o FFmpeg: {error}")),
+            Ok(None) => {}
+        }
+        if writer.is_finished() {
+            break Err(encoder_error(
+                hls,
+                "O envio de vídeo ao FFmpeg foi interrompido.",
+            ));
+        }
+        if !ready && hls.playlist_is_ready() && crate::server::playlist_is_served(hls_port, &route)
+        {
+            ready = true;
+            last_progress = Instant::now();
+            update("running", notice.clone());
+        }
+        if ready {
+            let modified = std::fs::metadata(&playlist)
+                .and_then(|metadata| metadata.modified())
+                .ok();
+            if modified.is_some() && modified != last_modified {
+                last_modified = modified;
+                last_progress = Instant::now();
+            }
+        }
+        if last_progress.elapsed() >= timeout {
+            let message = if ready {
+                "A playlist HLS parou de receber novos segmentos."
+            } else {
+                "O FFmpeg não gerou a playlist HLS a tempo."
+            };
+            break Err(encoder_error(hls, message));
+        }
+        thread::sleep(Duration::from_millis(100));
     };
 
-    Ok(CaptureHandle {
-        _control: control,
-        stop_signal: should_stop,
-    })
+    frames.close();
+    let encoder_result = encoder
+        .stop()
+        .map_err(|error| format!("Falha ao encerrar o FFmpeg: {error}"));
+    let capture_result = capture
+        .stop()
+        .map_err(|error| format!("Falha ao encerrar a fonte: {error}"));
+    match writer.join() {
+        Ok(Err(error)) => tracing::debug!(%error, "Envio de vídeo encerrado"),
+        Err(_) => tracing::error!("A thread de envio de vídeo terminou inesperadamente"),
+        Ok(Ok(())) => {}
+    }
+    outcome.and(encoder_result).and(capture_result)
+}
+
+fn start_source(
+    source_id: &str,
+    frames: Arc<Frames>,
+    framerate: u32,
+) -> Result<CaptureControl<CaptureHandler, CaptureError>, CaptureError> {
+    let (kind, value) = source_id
+        .split_once(':')
+        .ok_or("Fonte de captura inválida.")?;
+    let value = value.parse::<usize>()?;
+    let interval = Duration::from_secs_f64(1.0 / f64::from(framerate));
+    let native_interval = if GraphicsCaptureApi::is_minimum_update_interval_supported().unwrap_or(false) {
+        MinimumUpdateIntervalSettings::Custom(interval)
+    } else {
+        MinimumUpdateIntervalSettings::Default
+    };
+    macro_rules! capture {
+        ($target:expr) => {
+            CaptureHandler::start_free_threaded(Settings::new(
+                $target,
+                CursorCaptureSettings::Default,
+                DrawBorderSettings::WithoutBorder,
+                SecondaryWindowSettings::Default,
+                native_interval,
+                DirtyRegionSettings::Default,
+                ColorFormat::Rgba8,
+                CaptureFlags { frames, interval },
+            ))?
+        };
+    }
+    match kind {
+        "window" => Ok(capture!(Window::from_raw_hwnd(value as _))),
+        "monitor" => {
+            let monitor = Monitor::enumerate()?
+                .into_iter()
+                .find(|monitor| monitor.index().ok() == Some(value))
+                .ok_or("Monitor não encontrado.")?;
+            Ok(capture!(monitor))
+        }
+        _ => Err("Fonte de captura inválida.".into()),
+    }
+}
+
+fn write_frames(
+    mut input: ChildStdin,
+    frames: &Frames,
+    width: u32,
+    height: u32,
+    framerate: u32,
+) -> Result<(), CaptureError> {
+    let interval = Duration::from_secs_f64(1.0 / f64::from(framerate));
+    let mut next_frame = Instant::now();
+    let mut previous = None;
+    let mut resizer = Resizer::new();
+    let options = ResizeOptions::new().resize_alg(ResizeAlg::Nearest);
+
+    loop {
+        let frame = {
+            let mut state = frames.state.lock().unwrap();
+            if previous.is_none() {
+                state = frames
+                    .available
+                    .wait_while(state, |state| {
+                        state.latest.is_none() && !state.stopping && !state.source_closed
+                    })
+                    .unwrap();
+                next_frame = Instant::now();
+            } else {
+                state = frames
+                    .available
+                    .wait_timeout_while(
+                        state,
+                        next_frame.saturating_duration_since(Instant::now()),
+                        |state| !state.stopping && !state.source_closed,
+                    )
+                    .unwrap()
+                    .0;
+            }
+            if state.stopping || state.source_closed {
+                return Ok(());
+            }
+            state.latest.take()
+        };
+        if let Some(frame) = frame {
+            let data = if (frame.width, frame.height) == (width, height) {
+                if let Some(old) = previous.take() {
+                    frames.state.lock().unwrap().recycle_pixels(old);
+                }
+                frame.data
+            } else {
+                let source =
+                    Image::from_vec_u8(frame.width, frame.height, frame.data, PixelType::U8x4)?;
+                let mut target = match previous.take() {
+                    Some(pixels) => Image::from_vec_u8(width, height, pixels, PixelType::U8x4)?,
+                    None => Image::new(width, height, PixelType::U8x4),
+                };
+                resizer.resize(&source, &mut target, &options)?;
+                frames.state.lock().unwrap().recycle_pixels(source.into_vec());
+                target.into_vec()
+            };
+            previous = Some(data);
+        }
+        if let Some(data) = &previous {
+            input.write_all(data)?;
+        }
+        next_frame += interval;
+        if next_frame + interval < Instant::now() {
+            next_frame = Instant::now() + interval;
+        }
+    }
+}
+
+fn resolve_audio(
+    settings: &AppSettings,
+    stream: StreamAudioConfig,
+) -> (AudioConfig, Option<String>) {
+    let wants_system = stream.audio_mode != "muted";
+    let system_selected = wants_system && !settings.audio_device.trim().is_empty();
+    let microphone_selected =
+        stream.enable_microphone && !stream.microphone_device.trim().is_empty();
+    let devices = if system_selected || microphone_selected {
+        enumerate_audio_devices().unwrap_or_else(|error| {
+            tracing::warn!(%error, "Falha ao verificar os dispositivos de áudio");
+            Vec::new()
+        })
+    } else {
+        Vec::new()
+    };
+    let available = |name: &str| devices.iter().any(|device| device.name == name);
+    let enabled = system_selected && available(&settings.audio_device);
+    let microphone_enabled = microphone_selected && available(&stream.microphone_device);
+    let mut notices = Vec::new();
+    if stream.audio_mode == "process" {
+        notices.push(
+            "O áudio por processo está indisponível. Usando o áudio do sistema quando disponível.",
+        );
+    }
+    if wants_system && !enabled {
+        notices.push("Dispositivo de áudio do sistema indisponível. Confira as configurações.");
+    }
+    if stream.enable_microphone && !microphone_enabled {
+        notices.push("Microfone indisponível. Confira as configurações.");
+    }
+    let notice = (!notices.is_empty()).then(|| notices.join(" "));
+    (
+        AudioConfig {
+            enabled,
+            microphone_enabled,
+            device: settings.audio_device.clone(),
+            microphone_device: stream.microphone_device,
+            bitrate: settings.audio_bitrate,
+            buffer_size: settings.audio_buffer_size,
+            offset_ms: settings.audio_offset,
+            audio_filters: stream.audio_effects.to_ffmpeg_filter(),
+            microphone_filters: stream.microphone_effects.to_ffmpeg_filter(),
+        },
+        notice,
+    )
+}
+
+fn encoder_error(hls: &HlsConfig, message: &str) -> String {
+    let details = (|| {
+        let mut file = std::fs::File::open(format!("{}/ffmpeg.log", hls.stream_dir())).ok()?;
+        let offset = file.metadata().ok()?.len().saturating_sub(4096);
+        file.seek(SeekFrom::Start(offset)).ok()?;
+        let mut bytes = Vec::new();
+        file.take(4096).read_to_end(&mut bytes).ok()?;
+        let log = String::from_utf8_lossy(&bytes);
+        let detail = log.lines().rev().find(|line| !line.trim().is_empty())?;
+        Some(detail.trim().to_string())
+    })();
+    details.map_or_else(
+        || message.to_string(),
+        |detail| format!("{message} {detail}"),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::server::{playlist_is_served, start_server};
+
+    #[test]
+    fn synthetic_frames_generate_hls_over_http_and_stop() {
+        let directory =
+            std::env::temp_dir().join(format!("hipocast-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let result = (|| -> Result<(), CaptureError> {
+            let settings = AppSettings {
+                width: 320,
+                height: 180,
+                framerate: 15,
+                enable_hw_accel: false,
+                ..AppSettings::default()
+            };
+            let hls = HlsConfig::new(&directory.to_string_lossy(), "synthetic", 3, 1.0);
+            let port = start_server(0, directory.clone())?;
+            let route = hls.playlist_route();
+            assert!(!playlist_is_served(port, &route));
+            let stream_audio = StreamAudioConfig {
+                enable_microphone: true,
+                ..StreamAudioConfig::default()
+            };
+            let (audio, notice) = resolve_audio(&settings, stream_audio);
+            assert!(!audio.enabled && !audio.microphone_enabled);
+            assert!(notice.is_some());
+            let mut encoder = FfmpegEncoder::new(&settings, audio, &hls)?;
+            let input = encoder.take_input().ok_or("FFmpeg stdin unavailable")?;
+            let frames = Arc::new(Frames::default());
+            frames.state.lock().unwrap().latest = Some(FrameData {
+                data: vec![127; (settings.width * settings.height * 4) as usize],
+                width: settings.width,
+                height: settings.height,
+            });
+            let test_frames = frames.clone();
+            let writer = thread::spawn(move || {
+                write_frames(
+                    input,
+                    &test_frames,
+                    settings.width,
+                    settings.height,
+                    settings.framerate,
+                )
+            });
+            let deadline = Instant::now() + Duration::from_secs(12);
+            let mut ready = false;
+            while Instant::now() < deadline && !writer.is_finished() {
+                if hls.playlist_is_ready() && playlist_is_served(port, &route) {
+                    ready = true;
+                    break;
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+
+            frames.close();
+            encoder.stop()?;
+            let _ = writer.join().map_err(|_| "Video writer panicked")?;
+            if !ready {
+                return Err(encoder_error(&hls, "HLS não ficou disponível no teste.").into());
+            }
+            assert!(encoder.try_wait()?.is_some());
+            Ok(())
+        })();
+        std::fs::remove_dir_all(directory).unwrap();
+        result.unwrap();
+    }
 }

@@ -1,6 +1,6 @@
 # 🎥 HipoCast
 
-Sistema profissional de captura de tela e streaming via HLS com suporte a múltiplas fontes simultâneas, captura de áudio avançada e transmissão de links web.
+Aplicativo Windows para transmitir uma janela, um monitor ou uma página web via HLS. O HipoCast permite salvar várias transmissões e manter uma captura ativa por vez.
 
 ## 📋 Descrição
 
@@ -11,14 +11,13 @@ HipoCast é uma aplicação desktop desenvolvida com Tauri + React que permite c
 ### Captura de Vídeo
 - 🖥️ **Captura de Janelas**: Capture qualquer janela do sistema
 - 🌐 **Captura de Links Web**: Transmita páginas web em janela isolada
-- 📺 **Suporte a Múltiplos Monitores**: Capture diferentes monitores simultaneamente
+- 📺 **Suporte a Múltiplos Monitores**: Escolha qual monitor capturar
 - 🎬 **Codificação H.264**: Vídeo otimizado com suporte a aceleração por hardware (NVENC, QuickSync, AMF)
 - ⚡ **Baixa Latência**: Streaming HLS otimizado para transmissão em tempo real
 
 ### Captura de Áudio
-- 🎵 **Áudio do Sistema**: Captura áudio via WASAPI (Windows Audio Session API)
+- 🎵 **Áudio do Sistema**: Captura via DirectShow com um dispositivo de loopback, como Stereo Mix
 - 🎙️ **Captura de Microfone**: Suporte a múltiplos dispositivos de entrada
-- 🎯 **Captura por Processo**: Isole áudio de aplicações específicas
 - 🎛️ **Presets de Efeitos**: Filtros de áudio profissionais (Podcast, Gaming, Professional)
 - 🔊 **Controle de Volume**: Ajuste independente de áudio do sistema e microfone
 
@@ -26,7 +25,7 @@ HipoCast é uma aplicação desktop desenvolvida com Tauri + React que permite c
 - 📁 **IDs Personalizados**: Defina identificadores customizados para suas streams
 - ⏯️ **Pausar/Retomar**: Pause e retome streams mantendo configurações
 - 💾 **Configurações Persistentes**: Salve configurações de áudio por stream
-- 🔄 **Múltiplas Streams**: Gerencie várias capturas simultâneas
+- 🔄 **Transmissões salvas**: Alterne entre fontes usando Pausar e Retomar
 - 🗂️ **Organização Automática**: Segmentos HLS organizados por stream
 
 ### Interface
@@ -40,8 +39,9 @@ HipoCast é uma aplicação desktop desenvolvida com Tauri + React que permite c
 ### Pré-requisitos
 
 - **Node.js** 18+ 
-- **Rust** 1.70+
+- **Rust** stable com a toolchain MSVC
 - **Windows** 10/11 (com suporte a Graphics Capture API)
+- **Visual Studio Build Tools** com ferramentas de compilação C++ e **WebView2 Runtime**
 - **FFmpeg** (incluído no binário)
 
 ### Desenvolvimento
@@ -83,26 +83,23 @@ O instalador será gerado em `src-tauri/target/release/bundle/`
 **Captura de Link Web:**
 1. Clique em "Link"
 2. Cole a URL desejada
-3. Dê um nome para a stream
-4. (Opcional) Defina um identificador personalizado
-5. Clique em "Iniciar Captura"
+3. (Opcional) Defina um identificador personalizado
+4. Clique em "Iniciar Captura"
 
 ### 2. Configurar Áudio
 
-1. Clique no ícone de áudio (🔊) da stream
-2. Escolha o modo de áudio:
-   - **Sistema**: Captura todo áudio do sistema
-   - **Processo**: Captura áudio de aplicação específica
-   - **Mudo**: Sem áudio
-3. Ative o microfone se necessário
-4. Selecione presets de efeitos ou configure manualmente
-5. Clique em "Salvar"
+1. Para capturar áudio do sistema, habilite essa opção em Configurações e selecione um dispositivo de loopback.
+2. Em Ajustes da transmissão, escolha se quer capturar o áudio do sistema ou transmitir em mudo.
+3. Para incluir o microfone, ative-o e selecione o dispositivo de entrada.
+4. Ajuste os efeitos e clique em "Salvar". A transmissão ativa reinicia para aplicar os ajustes.
+
+O áudio por aplicação está indisponível. Se o dispositivo selecionado estiver ausente, o vídeo pode iniciar com o áudio restante ou em silêncio. O aviso aparece no card da transmissão.
 
 ### 3. Acessar a Stream
 
 A URL HLS é gerada automaticamente:
 ```
-http://localhost:8080/streams/{stream_id}/{stream_id}.m3u8
+http://127.0.0.1:8080/streams/{stream_id}/{stream_id}.m3u8
 ```
 
 Use em players compatíveis:
@@ -129,7 +126,7 @@ Use em players compatíveis:
 
 ### Áudio
 - **Bitrate**: 128, 192, 256, 320 kbps
-- **Modo**: Sistema, Processo Específico, Mudo
+- **Modo**: Sistema ou Mudo, com microfone opcional
 - **Presets**: CleanLight, CleanBalanced, Professional, Gaming, Podcast
 
 ### HLS
@@ -146,8 +143,8 @@ Use em players compatíveis:
 
 ### Backend (Rust + Tauri)
 - **Captura de Vídeo**: Windows Graphics Capture API
-- **Captura de Áudio**: WASAPI (Windows Audio Session API)
-- **Codificação**: FFmpeg com pipes nomeados
+- **Captura de Áudio**: DirectShow via FFmpeg
+- **Codificação**: FFmpeg recebe os frames via pipe
 - **Servidor HLS**: Axum (HTTP server)
 - **Banco de Dados**: SQLite
 
@@ -161,14 +158,14 @@ HipoCast/
 ├── src-tauri/            # Backend Rust
 │   ├── src/
 │   │   ├── capture.rs   # Captura de vídeo
-│   │   ├── audio.rs     # Captura de áudio WASAPI
+│   │   ├── commands/   # Comandos Tauri e configuração de áudio
 │   │   ├── encoder.rs   # Codificação H.264/AAC
 │   │   ├── ffmpeg.rs    # Integração FFmpeg
-│   │   ├── hls.rs       # Servidor HLS
+│   │   ├── server.rs    # Servidor HLS
 │   │   ├── db.rs        # Banco de dados
 │   │   └── stream_config.rs  # Configurações
 │   └── binaries/        # FFmpeg incluído
-└── public/streams/      # Segmentos HLS gerados
+└── public/              # Arquivos estáticos
 ```
 
 ## 🛠️ Tecnologias
@@ -177,7 +174,7 @@ HipoCast/
 - **React** - UI Framework
 - **Rust** - Backend de alta performance
 - **FFmpeg** - Codificação de mídia
-- **WASAPI** - Captura de áudio Windows
+- **DirectShow** - Captura de áudio no Windows
 - **Graphics Capture API** - Captura de tela Windows
 - **Axum** - Servidor HTTP
 - **SQLite** - Banco de dados local
@@ -197,6 +194,8 @@ Contribuições são bem-vindas! Sinta-se à vontade para abrir issues ou pull r
 Para problemas, dúvidas ou sugestões, abra uma [issue](https://github.com/seu-usuario/HipoCast/issues) no GitHub.
 
 ## 🔧 Desenvolvimento
+
+O banco e os segmentos HLS são gravados em `%LOCALAPPDATA%\com.fivey.hipocast`. O modo de desenvolvimento usa a subpasta `dev`. Na primeira execução, o app migra as configurações e as transmissões salvas do banco antigo, se ele existir.
 
 ### IDE Recomendado
 
@@ -218,7 +217,6 @@ cargo build --manifest-path src-tauri/Cargo.toml
 
 # Linting
 cargo clippy --manifest-path src-tauri/Cargo.toml
-npm run lint
 ```
 
 ---

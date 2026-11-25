@@ -21,9 +21,13 @@ export async function fetchWindows() {
 /**
  * Inicia captura de uma janela via Tauri
  */
-export async function startStream(sourceId, title = '') {
+export async function startStream(sourceId, title = '', customId = null) {
     try {
-        const response = await invoke('start_source_capture', { id: sourceId, title });
+        const response = await invoke('start_source_capture', {
+            id: sourceId,
+            title,
+            customId: customId?.trim() || null
+        });
         return response;
     } catch (error) {
         console.error('Erro ao iniciar stream:', error);
@@ -54,11 +58,15 @@ export async function startBrowserStream(url, title = 'Web Stream', customId = n
  */
 export async function stopStream(id) {
     try {
-        return await invoke('stop_source_capture');
+        return await invoke('stop_source_capture', { id });
     } catch (error) {
         console.error('Erro ao parar stream:', error);
         throw error;
     }
+}
+
+export function resumeStream(id) {
+    return invoke('resume_stream', { id });
 }
 
 /**
@@ -115,83 +123,15 @@ export async function updateSettings(settings) {
  * Lista dispositivos de áudio via FFmpeg DirectShow
  * Retorna: [{ name: string, deviceType: "loopback" | "input" }]
  */
-export async function listAudioDevices(forceRefresh = false) {
-    try {
-        return await invoke('list_audio_devices_ffmpeg', { forceRefresh });
-    } catch (error) {
-        console.error('Erro ao listar dispositivos de áudio:', error);
-        return [];
-    }
-}
-
-/**
- * Lista aplicações ativas com áudio (Audio Sessions)
- * NOTA: Função desabilitada após refatoração para FFmpeg DirectShow
- * Retorna: [{ process_id, process_name, display_name, icon_path }]
- */
-export async function listAudioSessions() {
-    try {
-        // Função removida após refatoração - retorna array vazio
-        console.warn('listAudioSessions foi removida após refatoração para FFmpeg DirectShow');
-        return [];
-    } catch (error) {
-        console.error('Erro ao listar audio sessions:', error);
-        return [];
-    }
+export function listAudioDevices(forceRefresh = false) {
+    return invoke('list_audio_devices_ffmpeg', { forceRefresh });
 }
 
 /**
  * Obtém configuração de áudio de uma stream específica
  */
-export async function getStreamAudioConfig(streamId) {
-    try {
-        const config = await invoke('get_stream_audio_config', { streamId });
-        if (!config) {
-            return {
-                streamId,
-                audioMode: 'system',
-                targetPid: null,
-                targetProcessName: null,
-                enableMicrophone: false,
-                microphoneDevice: '',
-                audioEffects: {
-                    enabled: false,
-                    preset: 'cleanbalanced',
-                    customFilters: null,
-                    masterVolume: 0.8
-                },
-                microphoneEffects: {
-                    enabled: false,
-                    preset: 'balanced',
-                    customFilters: null,
-                    volume: 1.0
-                }
-            };
-        }
-        return config;
-    } catch (error) {
-        // Se houver erro na chamada, retorna default
-        return {
-            streamId,
-            audioMode: 'system',
-            targetPid: null,
-            targetProcessName: null,
-            enableMicrophone: false,
-            microphoneDevice: '',
-            audioEffects: {
-                enabled: false,
-                preset: 'cleanbalanced',
-                customFilters: null,
-                masterVolume: 0.8
-            },
-            microphoneEffects: {
-                enabled: false,
-                preset: 'balanced',
-                customFilters: null,
-                volume: 1.0
-            }
-        };
-    }
+export function getStreamAudioConfig(streamId) {
+    return invoke('get_stream_audio_config', { streamId });
 }
 
 /**

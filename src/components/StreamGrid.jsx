@@ -5,11 +5,10 @@ import { StreamAudioModal } from './StreamAudioModal';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardFooter } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { stopStream, removeStream, startStream, startBrowserStream } from '@/api/streams';
-import { Square, ExternalLink, Copy, Check, Settings2, Pause, Play, Trash2, Volume2 } from 'lucide-react';
+import { stopStream, removeStream, resumeStream } from '@/api/streams';
+import { Square, ExternalLink, Copy, Check, Pause, Play, Trash2, Volume2 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { cn } from '@/lib/utils';
-import { invoke } from '@tauri-apps/api/core';
 import {
     AlertDialog,
     AlertDialogAction,
@@ -21,49 +20,24 @@ import {
     AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
 
-export default function StreamGrid({ streams, onStreamStopped }) {
+export default function StreamGrid({ streams, onStreamStopped, previewEnabled }) {
     const [copiedId, setCopiedId] = useState(null);
     const [streamToDelete, setStreamToDelete] = useState(null);
     const [audioModalOpen, setAudioModalOpen] = useState(false);
     const [selectedStream, setSelectedStream] = useState(null);
     const [errorMessage, setErrorMessage] = useState(null);
+    const [busy, setBusy] = useState(false);
 
-    const handleStop = async (id) => {
+    const runAction = async (action, fallbackMessage) => {
+        setBusy(true);
+        setErrorMessage(null);
         try {
-            const data = await stopStream(id);
-            if (data && onStreamStopped) {
-                // We pass null or specific logic if needed, but the best is to trigger a full refresh
-                // or use the returned data if we update the component to handle it.
-                // For now, let's just trigger the callback which we'll map to loadStatus
-                onStreamStopped();
-            }
+            await action();
         } catch (err) {
-            console.error('Erro ao pausar captura:', err);
-        }
-    };
-
-    const handleResume = async (stream) => {
-        if (!stream?.id) {
-            console.error('Erro ao retomar captura: ID do stream não definido');
-            return;
-        }
-        try {
-            // Buscar informações completas da stream do banco
-            const streamInfo = await invoke('get_stream_info', { streamId: stream.id });
-            
-            // Retomar baseado no tipo
-            if (streamInfo.sourceType === 'browser' && streamInfo.sourceUrl) {
-                // Browser stream: reinicia com URL e mantém o mesmo ID
-                await startBrowserStream(streamInfo.sourceUrl, stream.title || 'Web Stream', stream.id);
-            } else {
-                // Window capture: reinicia com o mesmo ID
-                // Nota: Se a janela foi fechada, isso pode falhar
-                await startStream(stream.id, stream.title || 'Stream');
-            }
-            onStreamStopped?.(); // Refresh after resume
-        } catch (err) {
-            console.error('Erro ao retomar captura:', err);
-            setErrorMessage('Erro ao retomar stream. A janela pode ter sido fechada ou a URL pode estar inválida.');
+            setErrorMessage(typeof err === 'string' ? err : fallbackMessage);
+        } finally {
+            setBusy(false);
+            onStreamStopped?.();
         }
     };
 
@@ -75,14 +49,8 @@ export default function StreamGrid({ streams, onStreamStopped }) {
     // Confirma e executa a exclusão
     const confirmRemove = async () => {
         if (!streamToDelete) return;
-        try {
-            await removeStream(streamToDelete);
-            onStreamStopped?.();
-        } catch (err) {
-            console.error('Erro ao encerrar captura:', err);
-        } finally {
-            setStreamToDelete(null);
-        }
+        await runAction(() => removeStream(streamToDelete), 'Erro ao remover a transmissão.');
+        setStreamToDelete(null);
     };
 
     const handleCopyLink = (stream) => {
@@ -122,6 +90,11 @@ export default function StreamGrid({ streams, onStreamStopped }) {
 
     return (
         <>
+            {errorMessage && (
+                <p role="alert" className="rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-200">
+                    {errorMessage}
+                </p>
+            )}
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                 <AnimatePresence>
                     {streams.map((stream) => (
@@ -136,9 +109,11 @@ export default function StreamGrid({ streams, onStreamStopped }) {
                             <Card className="overflow-hidden bg-slate-900/40 backdrop-blur-md border-slate-800/50 group hover:border-violet-500/50 transition-all duration-500 shadow-2xl shadow-black/40 rounded-2xl">
                                 <div className="relative aspect-video">
                                     <StreamPlayer
-                                        streamId={stream.id}
+                                        key={stream.playbackId}
                                         hlsPath={stream.hlsPath}
                                         status={stream.status}
+                                        message={stream.message}
+                                        enabled={previewEnabled}
                                     />
 
                                     {/* Overlay - Badge de Status no Topo Esquerdo */}
@@ -148,13 +123,13 @@ export default function StreamGrid({ streams, onStreamStopped }) {
                                                 "px-3 py-1 rounded-full text-xs font-bold tracking-wider border transition-all duration-500 shadow-lg",
                                                 stream.status === 'running'
                                                     ? 'bg-green-500/90 text-white border-green-400/50 shadow-green-500/50'
-                                                    : stream.status === 'restarting'
+                                                    : stream.status === 'starting'
                                                         ? 'bg-yellow-500/90 text-white border-yellow-400/50 shadow-yellow-500/50'
                                                         : 'bg-red-500/90 text-white border-red-400/50 shadow-red-500/50'
                                             )
                                         }>
                                             <div className={cn("w-1.5 h-1.5 rounded-full mr-2", stream.status === 'running' ? "bg-white animate-pulse" : "bg-white")} />
-                                            {stream.status === 'running' ? 'AO VIVO' : stream.status === 'restarting' ? 'INICIANDO' : 'PAUSADO'}
+                                            {{ running: 'AO VIVO', starting: 'INICIANDO', failed: 'FALHOU' }[stream.status] || 'PAUSADO'}
                                         </Badge>
                                     </div>
 
@@ -183,6 +158,7 @@ export default function StreamGrid({ streams, onStreamStopped }) {
                                             variant="destructive"
                                             className="w-9 h-9 rounded-full bg-red-500/90 backdrop-blur-md border-red-400/50 hover:bg-red-600 transition-all shadow-lg shadow-red-500/30"
                                             onClick={() => handleRemoveRequest(stream.id)}
+                                            disabled={busy}
                                             title="Encerrar transmissão"
                                         >
                                             <Trash2 className="w-4 h-4" />
@@ -197,6 +173,9 @@ export default function StreamGrid({ streams, onStreamStopped }) {
                                             <p className="text-xs text-slate-500 font-medium">ID: {stream.id}</p>
                                         </div>
                                     </div>
+                                    {stream.message && stream.status !== 'failed' && (
+                                        <p role="status" className="text-xs text-amber-300">{stream.message}</p>
+                                    )}
 
                                     {/* Link for copying */}
                                     <div
@@ -226,12 +205,13 @@ export default function StreamGrid({ streams, onStreamStopped }) {
                                     </Button>
 
                                     {/* Botão Pausar/Retomar */}
-                                    {stream.status === 'running' ? (
+                                    {['running', 'starting'].includes(stream.status) ? (
                                         <Button
                                             variant="secondary"
                                             size="sm"
                                             className="flex-1 bg-yellow-500/10 hover:bg-yellow-500/20 text-yellow-400 border border-yellow-500/20 hover:border-yellow-500/40 transition-all font-bold text-xs h-9"
-                                            onClick={() => handleStop(stream.id)}
+                                            disabled={busy}
+                                            onClick={() => runAction(() => stopStream(stream.id), 'Erro ao pausar a transmissão.')}
                                         >
                                             <Pause className="w-3.5 h-3.5 mr-2 fill-current" />
                                             Pausar
@@ -241,7 +221,8 @@ export default function StreamGrid({ streams, onStreamStopped }) {
                                             variant="secondary"
                                             size="sm"
                                             className="flex-1 bg-green-500/10 hover:bg-green-500/20 text-green-400 border border-green-500/20 hover:border-green-500/40 transition-all font-bold text-xs h-9"
-                                            onClick={() => handleResume(stream)}
+                                            disabled={busy}
+                                            onClick={() => runAction(() => resumeStream(stream.id), 'Erro ao retomar a transmissão.')}
                                         >
                                             <Play className="w-3.5 h-3.5 mr-2 fill-current" />
                                             Retomar
@@ -265,7 +246,7 @@ export default function StreamGrid({ streams, onStreamStopped }) {
                     </AlertDialogHeader>
                     <AlertDialogFooter>
                         <AlertDialogCancel onClick={() => setStreamToDelete(null)}>Cancelar</AlertDialogCancel>
-                        <AlertDialogAction onClick={confirmRemove}>Sim, Encerrar</AlertDialogAction>
+                        <AlertDialogAction disabled={busy} onClick={confirmRemove}>Sim, Encerrar</AlertDialogAction>
                     </AlertDialogFooter>
                 </AlertDialogContent>
             </AlertDialog>

@@ -11,44 +11,15 @@ import {
     AlertDialogHeader,
     AlertDialogTitle,
 } from './ui/alert-dialog';
-import { 
-    getStreamAudioConfig, 
-    saveStreamAudioConfig, 
-    listAudioSessions,
-    getStatus,
-    stopStream,
-    startStream,
-    startBrowserStream
-} from '../api/streams';
+import { getStreamAudioConfig, saveStreamAudioConfig } from '../api/streams';
+import { AudioDeviceSelector } from './AudioDeviceSelector';
 import { invoke } from '@tauri-apps/api/core';
 
 export function StreamAudioModal({ streamId, streamTitle, isOpen, onClose }) {
-    const [config, setConfig] = useState({
-        streamId: streamId,
-        audioMode: 'system',
-        targetPid: null,
-        targetProcessName: null,
-        enableMicrophone: false,
-        microphoneDevice: '',
-        audioEffects: {
-            enabled: false,
-            preset: 'cleanbalanced',
-            customFilters: null,
-            masterVolume: 0.8
-        },
-        microphoneEffects: {
-            enabled: false,
-            preset: 'balanced',
-            customFilters: null,
-            volume: 1.0
-        }
-    });
-
-    const [audioSessions, setAudioSessions] = useState([]);
+    const [config, setConfig] = useState(null);
     const [loading, setLoading] = useState(false);
     const [saving, setSaving] = useState(false);
     const [suggestedPreset, setSuggestedPreset] = useState(null);
-    const [showAdvanced, setShowAdvanced] = useState(false);
     const [errorMessage, setErrorMessage] = useState(null);
     const [microphonePresets, setMicrophonePresets] = useState([]);
 
@@ -80,36 +51,17 @@ export function StreamAudioModal({ streamId, streamTitle, isOpen, onClose }) {
 
     const loadData = async () => {
         setLoading(true);
+        setConfig(null);
         try {
-            // Carregar config existente (já retorna default se não existir)
             const existingConfig = await getStreamAudioConfig(streamId);
-            
-            // Garantir que todos os campos necessários existam
-            const fullConfig = {
+            setConfig(existingConfig.audioMode === 'process' ? {
                 ...existingConfig,
-                streamId, // Garantir que o ID está correto
-                audioEffects: {
-                    enabled: false,
-                    preset: 'cleanbalanced',
-                    customFilters: null,
-                    masterVolume: 0.8,
-                    ...(existingConfig.audioEffects || {})
-                },
-                microphoneEffects: {
-                    enabled: false,
-                    preset: 'balanced',
-                    customFilters: null,
-                    volume: 1.0,
-                    ...(existingConfig.microphoneEffects || {})
-                }
-            };
-            setConfig(fullConfig);
-
-            // Carregar sessões de áudio
-            const sessions = await listAudioSessions();
-            setAudioSessions(sessions);
+                audioMode: 'system',
+                targetPid: null,
+                targetProcessName: null,
+            } : existingConfig);
         } catch (error) {
-            console.error('Erro ao carregar dados:', error);
+            setErrorMessage(typeof error === 'string' ? error : 'Erro ao carregar o áudio da transmissão.');
         } finally {
             setLoading(false);
         }
@@ -118,41 +70,10 @@ export function StreamAudioModal({ streamId, streamTitle, isOpen, onClose }) {
     const handleSave = async () => {
         setSaving(true);
         try {
-            // 1. Salvar configurações no banco
             await saveStreamAudioConfig(config);
-            
-            // 2. Verificar se esta transmissão está ativa no momento
-            const status = await getStatus();
-            const activeStream = status.streams?.find(s => s.id === streamId && s.status === 'running');
-            
-            // 3. Se estiver ativa, reiniciar para aplicar as mudanças de áudio
-            if (activeStream) {
-                console.log('Reiniciando stream ativa para aplicar novos efeitos de áudio...');
-                
-                // Buscar informações completas da stream do banco para saber como reiniciar
-                const streamInfo = await invoke('get_stream_info', { streamId });
-                
-                // Parar a captura atual (agora com kill() do FFmpeg, é instantâneo)
-                await stopStream(streamId);
-                
-                // Com o kill() do FFmpeg, os pipes são liberados imediatamente
-                // Apenas pequeno delay para garantir que o sistema operacional processou
-                await new Promise(resolve => setTimeout(resolve, 500));
-                
-                // Reiniciar imediatamente
-                if (streamInfo.sourceType === 'browser' && streamInfo.sourceUrl) {
-                    await startBrowserStream(streamInfo.sourceUrl, streamTitle, streamId);
-                } else {
-                    await startStream(streamId, streamTitle);
-                }
-            }
-            
             onClose();
         } catch (error) {
-            console.error('Erro detalhado ao salvar:', error);
-            // Se o erro for um objeto, tenta pegar a mensagem, senão usa a padrão
-            const msg = typeof error === 'string' ? error : (error?.message || 'Erro ao salvar configurações de áudio.');
-            setErrorMessage(`${msg}. Por favor, tente novamente.`);
+            setErrorMessage(typeof error === 'string' ? error : 'Erro ao salvar o áudio da transmissão.');
         } finally {
             setSaving(false);
         }
@@ -164,15 +85,6 @@ export function StreamAudioModal({ streamId, streamTitle, isOpen, onClose }) {
             audioMode: mode,
             targetPid: null,
             targetProcessName: null
-        }));
-    };
-
-    const handleProcessSelect = (processId) => {
-        const session = audioSessions.find(s => s.process_id === parseInt(processId));
-        setConfig(prev => ({
-            ...prev,
-            targetPid: parseInt(processId),
-            targetProcessName: session?.process_name || null
         }));
     };
 
@@ -287,8 +199,8 @@ export function StreamAudioModal({ streamId, streamTitle, isOpen, onClose }) {
 
                 {/* Conteúdo - Scrollable */}
                 <div className="flex-1 overflow-y-auto px-6 py-4">
-                    {loading ? (
-                        <div className="text-center py-8 text-gray-400">Carregando...</div>
+                    {loading || !config ? (
+                        <div className="text-center py-8 text-gray-400">{loading ? 'Carregando...' : 'Configuração indisponível.'}</div>
                     ) : (
                         <div className="space-y-6">
                         {/* Fonte de Áudio */}
@@ -313,21 +225,6 @@ export function StreamAudioModal({ streamId, streamTitle, isOpen, onClose }) {
                                 </button>
 
                                 <button
-                                    onClick={() => handleAudioModeChange('process')}
-                                    className={`w-full p-3 rounded-lg border transition flex items-center gap-3 ${
-                                        config.audioMode === 'process' 
-                                            ? 'border-blue-500 bg-blue-500/10 text-white' 
-                                            : 'border-gray-600 bg-gray-700/50 text-gray-300 hover:border-gray-500'
-                                    }`}
-                                >
-                                    <Volume2 size={20} />
-                                    <div className="text-left">
-                                        <div className="font-medium">Aplicação Específica</div>
-                                        <div className="text-xs text-gray-400">Selecione qual app capturar</div>
-                                    </div>
-                                </button>
-
-                                <button
                                     onClick={() => handleAudioModeChange('muted')}
                                     className={`w-full p-3 rounded-lg border transition flex items-center gap-3 ${
                                         config.audioMode === 'muted' 
@@ -344,35 +241,9 @@ export function StreamAudioModal({ streamId, streamTitle, isOpen, onClose }) {
                             </div>
                         </div>
 
-                        {/* Seletor de Processo */}
-                        {config.audioMode === 'process' && (
-                            <div>
-                                <label className="block text-sm font-medium text-gray-300 mb-2">
-                                    Selecione a Aplicação
-                                </label>
-                                {audioSessions.length > 0 ? (
-                                    <Select 
-                                        value={config.targetPid?.toString() || ''} 
-                                        onChange={(e) => handleProcessSelect(e.target.value)}
-                                        className="w-full"
-                                    >
-                                        <option value="">Escolha uma aplicação...</option>
-                                        {audioSessions.map(session => (
-                                            <option 
-                                                key={session.process_id} 
-                                                value={session.process_id.toString()}
-                                            >
-                                                {session.display_name || session.process_name} (PID: {session.process_id})
-                                            </option>
-                                        ))}
-                                    </Select>
-                                ) : (
-                                    <div className="text-sm text-gray-400 p-3 bg-gray-700/50 rounded border border-gray-600">
-                                        Nenhuma aplicação com áudio ativo detectada
-                                    </div>
-                                )}
-                            </div>
-                        )}
+                        <p className="text-xs text-gray-400">
+                            Áudio por aplicação indisponível. A captura do sistema usa o dispositivo selecionado nas configurações.
+                        </p>
 
                         {/* Microfone */}
                         <div>
@@ -391,9 +262,13 @@ export function StreamAudioModal({ streamId, streamTitle, isOpen, onClose }) {
                                 <span>{config.enableMicrophone ? 'Ativado' : 'Desativado'}</span>
                             </button>
                             {config.enableMicrophone && (
-                                <p className="text-xs text-gray-400 mt-2">
-                                    💡 Usando microfone padrão do Windows (WASAPI)
-                                </p>
+                                <div className="mt-2">
+                                    <AudioDeviceSelector
+                                        settings={config}
+                                        onUpdate={setConfig}
+                                        deviceType="input"
+                                    />
+                                </div>
                             )}
                         </div>
 

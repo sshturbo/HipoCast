@@ -4,12 +4,11 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Combobox } from '@/components/ui/combobox';
-import { Badge } from '@/components/ui/badge';
 import { Loader2, Play, RefreshCw, Monitor, Zap, Layout, Globe } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { motion, AnimatePresence } from 'framer-motion';
 
-export default function ControlPanel({ onStreamStarted }) {
+export default function ControlPanel({ onStreamStarted, serverError }) {
     const [mode, setMode] = useState('window'); // 'window' ou 'link'
     const [windows, setWindows] = useState([]);
     const [selectedWindow, setSelectedWindow] = useState('');
@@ -48,10 +47,7 @@ export default function ControlPanel({ onStreamStarted }) {
                 const win = JSON.parse(selectedWindow);
                 const finalTitle = streamId.trim() || win.title || 'Stream';
                 
-                // Se tem streamId customizado, usar ele como ID real
-                // Senão, usar o ID da janela
-                const finalId = streamId.trim() || win.id;
-                await startStream(finalId, finalTitle);
+                await startStream(win.id, finalTitle, streamId);
             } else {
                 // Para browser stream, enviar customId separado
                 const finalTitle = streamId.trim() || 'Web Stream';
@@ -67,7 +63,7 @@ export default function ControlPanel({ onStreamStarted }) {
             setStreamId('');
             setBrowserUrl('');
         } catch (err) {
-            setError(err.message || 'Erro ao iniciar stream');
+            setError(typeof err === 'string' ? err : err.message || 'Erro ao iniciar stream');
         } finally {
             setLoading(false);
         }
@@ -91,11 +87,6 @@ export default function ControlPanel({ onStreamStarted }) {
                                     <h3 className="text-base font-bold text-white tracking-wide uppercase">Configurador de Transmissão</h3>
                                     <p className="text-[11px] text-slate-500 font-medium tracking-wider uppercase">Configure sua fonte e inicie o pipeline</p>
                                 </div>
-                            </div>
-                            <div className="flex items-center gap-2">
-                                <Badge variant="outline" className="bg-slate-950/50 border-slate-800 text-[10px] text-slate-400 py-1 px-3 uppercase tracking-tighter">
-                                    Status: Ready
-                                </Badge>
                             </div>
                         </div>
 
@@ -200,13 +191,14 @@ export default function ControlPanel({ onStreamStarted }) {
                                     <div className="px-1">
                                         <label className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] flex items-center gap-2">
                                             <Zap className="w-3 h-3 text-violet-500" />
-                                            Identificador de Link (Opcional)
+                                            Identificador da transmissão (opcional)
                                         </label>
                                     </div>
                                     <Input
                                         placeholder="ex: live_gaming_01"
                                         value={streamId}
-                                        onChange={(e) => setStreamId(e.target.value.toLowerCase().replace(/[^a-z0-9_]/g, ''))}
+                                        maxLength={64}
+                                        onChange={(e) => setStreamId(e.target.value.toLowerCase().replace(/[^a-z0-9_-]/g, ''))}
                                         disabled={loading}
                                         className="bg-slate-950/50 border-slate-800/80 h-14 text-sm focus:ring-2 focus:ring-violet-500/20 rounded-xl"
                                     />
@@ -215,7 +207,7 @@ export default function ControlPanel({ onStreamStarted }) {
                                 <div className="lg:col-span-5">
                                     <Button
                                         onClick={handleStart}
-                                        disabled={loading || (mode === 'window' ? !selectedWindow : !browserUrl)}
+                                        disabled={loading || !!serverError || (mode === 'window' ? !selectedWindow : !browserUrl.trim())}
                                         className={cn(
                                             "w-full h-14 font-black uppercase tracking-[0.15em] text-xs transition-all duration-300 rounded-xl",
                                             loading
@@ -235,7 +227,7 @@ export default function ControlPanel({ onStreamStarted }) {
 
                             {/* Error Message */}
                             <AnimatePresence>
-                                {error && (
+                                {(serverError || error) && (
                                     <motion.div
                                         initial={{ opacity: 0, height: 0 }}
                                         animate={{ opacity: 1, height: 'auto' }}
@@ -244,7 +236,7 @@ export default function ControlPanel({ onStreamStarted }) {
                                     >
                                         <div className="flex items-center gap-2 p-3 rounded-lg bg-red-500/10 border border-red-500/20 text-red-400 text-xs font-bold uppercase tracking-wider">
                                             <Zap className="w-3 h-3 rotate-180" />
-                                            {error}
+                                            {serverError || error}
                                         </div>
                                     </motion.div>
                                 )}

@@ -1,124 +1,57 @@
-use crate::encoder::get_ffmpeg_path;
+use crate::commands::capture_cmd::restart_if_active;
+use crate::encoder::enumerate_audio_devices;
 use crate::state::{AppState, AudioDeviceInfo};
-use crate::stream_config;
-use tauri::State;
+use crate::stream_config::StreamAudioConfig;
+use tauri::{AppHandle, State};
 
-// Implementação real: lista dispositivos de áudio via FFmpeg DirectShow
 #[tauri::command]
-pub fn list_audio_devices_ffmpeg(
+pub async fn list_audio_devices_ffmpeg(
     state: State<'_, AppState>,
     force_refresh: bool,
 ) -> Result<Vec<AudioDeviceInfo>, String> {
-    use std::process::Command;
-
-    // Check cache
-    {
+    if !force_refresh {
         let cache = state.audio_devices_cache.lock().unwrap();
-        if !force_refresh {
-            if let Some((timestamp, devices)) = cache.as_ref() {
-                // Return cached if less than 30 seconds old
-                if timestamp.elapsed() < std::time::Duration::from_secs(30) {
-                    tracing::debug!(
-                        "💾 Using cached audio devices ({}s old)",
-                        timestamp.elapsed().as_secs()
-                    );
-                    return Ok(devices.clone());
-                }
+        if let Some((timestamp, devices)) = cache.as_ref() {
+            if timestamp.elapsed().as_secs() < 30 {
+                return Ok(devices.clone());
             }
         }
     }
-
-    tracing::info!("🎧 Listando dispositivos de áudio via FFmpeg DirectShow...");
-
-    let ffmpeg_path = get_ffmpeg_path();
-
-    // Executar FFmpeg para listar dispositivos
-    let output = Command::new(&ffmpeg_path)
-        .args(["-list_devices", "true", "-f", "dshow", "-i", "dummy"])
-        .output()
-        .map_err(|e| format!("Falha ao executar FFmpeg: {}", e))?;
-
-    // O output vem no stderr
-    let stderr = String::from_utf8_lossy(&output.stderr);
-
-    let mut devices = Vec::new();
-
-    // Parsear linhas do output
-    // Formato: [dshow @ 0x...] "NOME DO DISPOSITIVO" (audio)
-    for line in stderr.lines() {
-        // Procurar por linhas que contêm dispositivos de áudio
-        if line.contains("(audio)") && line.contains("[dshow") {
-            // Extrair nome entre aspas
-            if let Some(start) = line.find('"') {
-                if let Some(end) = line[start + 1..].find('"') {
-                    let device_name = &line[start + 1..start + 1 + end];
-
-                    // Classificar tipo de dispositivo
-                    let device_type = if device_name.to_lowercase().contains("stereo mix")
-                        || device_name.to_lowercase().contains("mixagem")
-                        || device_name.to_lowercase().contains("wave out")
-                        || device_name.to_lowercase().contains("what you hear")
-                    {
-                        "loopback".to_string()
-                    } else {
-                        "input".to_string()
-                    };
-
-                    // Log antes de mover device_type
-                    tracing::debug!(
-                        "  ✓ Encontrado: {} ({})",
-                        device_name,
-                        if device_type == "loopback" {
-                            "Sistema"
-                        } else {
-                            "Entrada"
-                        }
-                    );
-
-                    devices.push(AudioDeviceInfo {
-                        name: device_name.to_string(),
-                        device_type,
-                    });
-                }
-            }
-        }
-    }
-
-    tracing::info!("✅ Total de dispositivos encontrados: {}", devices.len());
-
-    if devices.is_empty() {
-        Err("Nenhum dispositivo de áudio encontrado".to_string())
-    } else {
-        // Update cache
-        {
-            let mut cache = state.audio_devices_cache.lock().unwrap();
-            *cache = Some((std::time::Instant::now(), devices.clone()));
-        }
-        Ok(devices)
-    }
+    let devices = tauri::async_runtime::spawn_blocking(enumerate_audio_devices)
+        .await
+        .map_err(|error| error.to_string())??;
+    *state.audio_devices_cache.lock().unwrap() = Some((std::time::Instant::now(), devices.clone()));
+    Ok(devices)
 }
 
 #[tauri::command]
 pub fn get_stream_audio_config(
-    state: State<AppState>,
+    state: State<'_, AppState>,
     stream_id: String,
-) -> Result<stream_config::StreamAudioConfig, String> {
-    state
+) -> Result<StreamAudioConfig, String> {
+    let config = state
         .db
         .get_stream_audio_config(&stream_id)
-        .map_err(|e| format!("DB error: {}", e))?
-        .ok_or_else(|| "Config not found".to_string())
+        .map_err(|error| error.to_string())?;
+    Ok(config.unwrap_or_else(|| state.db.create_default_audio_config_from_global(&stream_id)))
 }
 
 #[tauri::command]
-pub fn save_stream_audio_config(
-    state: State<AppState>,
-    config: stream_config::StreamAudioConfig,
+pub async fn save_stream_audio_config(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    config: StreamAudioConfig,
 ) -> Result<(), String> {
+    if !matches!(config.audio_mode.as_str(), "system" | "muted") {
+        return Err("Selecione áudio do sistema ou mudo.".into());
+    }
+    let mut capture = state.capture.lock().await;
     state
         .db
         .save_stream_audio_config(&config)
-        .map_err(|e| format!("Failed to save config: {}", e))
+        .map_err(|error| error.to_string())?;
+    restart_if_active(&app, &state, &mut capture, Some(&config.stream_id)).await?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -126,43 +59,18 @@ pub fn delete_stream_audio_config(state: State<AppState>, stream_id: String) -> 
     state
         .db
         .delete_stream_audio_config(&stream_id)
-        .map_err(|e| format!("Failed to delete config: {}", e))
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
 pub fn reset_stream_audio_config(
     state: State<AppState>,
     stream_id: String,
-) -> Result<stream_config::StreamAudioConfig, String> {
-    // Deleta config existente
-    let _ = state.db.delete_stream_audio_config(&stream_id);
-
-    // Cria novo config com defaults otimizados (sem filtros pesados)
-    let new_config = stream_config::StreamAudioConfig {
-        stream_id: stream_id.clone(),
-        audio_mode: "system".to_string(),
-        target_pid: None,
-        target_process_name: None,
-        enable_microphone: false,
-        microphone_device: "".to_string(),
-        audio_effects: stream_config::AudioEffects {
-            enabled: false,
-            preset: stream_config::AudioPreset::None,
-            custom_filters: None,
-            master_volume: 1.0,
-        },
-        microphone_effects: stream_config::MicrophoneEffects {
-            enabled: false,
-            preset: stream_config::MicrophonePreset::None,
-            custom_filters: None,
-            volume: 1.0,
-        },
-    };
-
+) -> Result<StreamAudioConfig, String> {
+    let config = state.db.create_default_audio_config_from_global(&stream_id);
     state
         .db
-        .save_stream_audio_config(&new_config)
-        .map_err(|e| format!("Failed to save reset config: {}", e))?;
-
-    Ok(new_config)
+        .delete_stream_audio_config(&stream_id)
+        .map_err(|error| error.to_string())?;
+    Ok(config)
 }

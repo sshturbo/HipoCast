@@ -1,148 +1,135 @@
 import { useEffect, useRef, useState } from 'react';
-import Hls from 'hls.js';
-import { Tv, Loader2, AlertCircle } from 'lucide-react';
+import { AlertCircle, Loader2, Tv } from 'lucide-react';
 
-export default function StreamPlayer({ streamId, hlsPath, status, onError }) {
+export default function StreamPlayer({ hlsPath, status, message, enabled }) {
     const videoRef = useRef(null);
-    const hlsRef = useRef(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
+    const [visible, setVisible] = useState(() => !document.hidden);
+
+    useEffect(() => {
+        const updateVisibility = () => setVisible(!document.hidden);
+        document.addEventListener('visibilitychange', updateVisibility);
+        return () => document.removeEventListener('visibilitychange', updateVisibility);
+    }, []);
 
     useEffect(() => {
         const video = videoRef.current;
-        if (!video || !hlsPath || status !== 'running') return;
+        if (!video || !hlsPath || status !== 'running' || !enabled || !visible) return;
 
-        const baseUrl = hlsPath.startsWith('http') ? hlsPath : `http://localhost:8080${hlsPath}`;
-        const streamUrl = `${baseUrl}?t=${Date.now()}`;
-        console.log('StreamPlayer: Carregando', streamUrl);
-
+        let player;
+        let disposed = false;
+        let failed = false;
+        let recoveryAttempted = false;
         setLoading(true);
         setError(null);
 
-        if (hlsRef.current) {
-            hlsRef.current.destroy();
-            hlsRef.current = null;
-        }
-
-        // Initialize HLS immediately
-        if (Hls.isSupported()) {
-            const hls = new Hls({
-                enableWorker: true,
-                lowLatencyMode: true,
-                liveSyncDuration: 4, // More conservative to avoid freezes
-                liveMaxLatencyDuration: 10, // Max 10s delay allowed
-                liveDurationInfinity: true,
-                maxBufferLength: 8,
-                manifestLoadingTimeOut: 5000,
-                manifestLoadingMaxRetry: 20, // More retries for initial 404s
-                manifestLoadingRetryDelay: 1000,
-                levelLoadingTimeOut: 5000,
-                levelLoadingMaxRetry: 20,
-                fragLoadingTimeOut: 10000,
-                fragLoadingMaxRetry: 10,
-            });
-
-            hls.loadSource(streamUrl);
-            hls.attachMedia(video);
-
-            hls.on(Hls.Events.MANIFEST_PARSED, () => {
-                console.log('StreamPlayer: Manifest parsed');
-                setLoading(false);
-                video.play().catch((e) => {
-                    console.warn('StreamPlayer: Autoplay bloqueado', e);
-                });
-            });
-
-            hls.on(Hls.Events.ERROR, (event, data) => {
-                if (data.fatal) {
-                    console.warn('StreamPlayer Fatal Error:', data.type, data.details);
-                    switch (data.type) {
-                        case Hls.ErrorTypes.NETWORK_ERROR:
-                            // If it's a 404, we just keep waiting/retrying
-                            console.log('StreamPlayer: Network error, retrying...');
-                            hls.startLoad();
-                            break;
-                        case Hls.ErrorTypes.MEDIA_ERROR:
-                            console.log('StreamPlayer: Media error, recovering...');
-                            hls.recoverMediaError();
-                            break;
-                        default:
-                            console.error('StreamPlayer: Unrecoverable error', data);
-                            hls.destroy();
-                            setError('Erro fatal na transmissão');
-                            setLoading(false);
-                            break;
-                    }
-                }
-            });
-
-            hlsRef.current = hls;
-        } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-            video.src = streamUrl;
-            video.addEventListener('loadedmetadata', () => {
-                setLoading(false);
-                video.play().catch(() => { });
-            });
-        } else {
-            setError('Navegador não suportado');
+        const ready = () => {
+            clearTimeout(timeout);
             setLoading(false);
-        }
+        };
+        const fail = (message) => {
+            if (disposed || failed) return;
+            failed = true;
+            player?.destroy();
+            player = undefined;
+            ready();
+            setError(message);
+        };
+        const mediaError = () => fail('Não foi possível reproduzir a transmissão.');
+        const timeout = setTimeout(() => fail('O player não recebeu vídeo a tempo.'), 20000);
+        video.addEventListener('loadeddata', ready);
+        video.addEventListener('error', mediaError);
+
+        import('hls.js').then(({ default: Hls }) => {
+            if (disposed || failed) return;
+
+            if (Hls.isSupported()) {
+                player = new Hls({
+                    enableWorker: true,
+                    lowLatencyMode: true,
+                    maxBufferLength: 8,
+                });
+                player.on(Hls.Events.MANIFEST_PARSED, () => video.play().catch(() => {}));
+                player.on(Hls.Events.ERROR, (_, data) => {
+                    if (!data.fatal || !player) return;
+                    if (!recoveryAttempted && data.type === Hls.ErrorTypes.MEDIA_ERROR) {
+                        recoveryAttempted = true;
+                        player.recoverMediaError();
+                        return;
+                    }
+                    fail('O player perdeu acesso à transmissão HLS.');
+                });
+                player.loadSource(hlsPath);
+                player.attachMedia(video);
+            } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+                video.src = hlsPath;
+            } else {
+                fail('Este navegador não oferece suporte a HLS.');
+            }
+        }).catch(() => fail('Não foi possível carregar o player HLS.'));
 
         return () => {
-            if (hlsRef.current) {
-                hlsRef.current.destroy();
-                hlsRef.current = null;
-            }
+            disposed = true;
+            clearTimeout(timeout);
+            video.removeEventListener('loadeddata', ready);
+            video.removeEventListener('error', mediaError);
+            video.pause();
+            player?.destroy();
+            video.removeAttribute('src');
+            video.load();
         };
-    }, [hlsPath, status, onError]);
+    }, [hlsPath, status, enabled, visible]);
 
-    if (status === 'restarting') {
+    if (status === 'starting') {
         return (
-            <div className="w-full h-full flex flex-col items-center justify-center gap-3 text-yellow-500 bg-slate-900">
-                <Loader2 className="w-12 h-12 animate-spin" />
-                <span className="text-sm">Reiniciando...</span>
+            <div role="status" className="flex h-full flex-col items-center justify-center gap-3 bg-slate-900 text-yellow-400">
+                <Loader2 className="h-9 w-9 animate-spin" />
+                <span className="text-sm">Iniciando transmissão...</span>
             </div>
         );
     }
 
-    if (status !== 'running' && status !== 'restarting') {
+    if (status === 'failed') {
         return (
-            <div className="w-full h-full flex flex-col items-center justify-center gap-3 text-slate-500 bg-slate-900">
-                <Tv className="w-12 h-12 opacity-50" />
-                <span className="text-sm">Stream pausado</span>
+            <div role="alert" className="flex h-full flex-col items-center justify-center gap-3 overflow-y-auto bg-slate-900 p-3 text-center text-red-300">
+                <AlertCircle className="h-8 w-8 shrink-0" />
+                <span className="break-words text-xs">{message || 'Falha ao capturar a transmissão.'}</span>
+            </div>
+        );
+    }
+
+    if (status !== 'running') {
+        return (
+            <div className="flex h-full flex-col items-center justify-center gap-3 bg-slate-900 text-slate-500">
+                <Tv className="h-12 w-12 opacity-50" />
+                <span className="text-sm">Transmissão pausada</span>
+            </div>
+        );
+    }
+
+    if (!enabled || !visible) {
+        return (
+            <div className="flex h-full flex-col items-center justify-center gap-3 bg-slate-900 text-slate-400">
+                <Tv className="h-9 w-9 opacity-50" />
+                <span className="text-sm">Prévia suspensa</span>
             </div>
         );
     }
 
     return (
-        <div className="relative w-full h-full bg-black">
-            <video
-                ref={videoRef}
-                className="w-full h-full object-contain"
-                controls
-                autoPlay
-                muted
-                playsInline
-            />
-
+        <div className="relative h-full w-full bg-black">
+            <video ref={videoRef} className="h-full w-full object-contain" controls autoPlay muted playsInline />
             {loading && (
-                <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/80">
-                    <Loader2 className="w-8 h-8 text-violet-500 animate-spin" />
-                    <span className="text-xs text-slate-400 mt-2">Aguardando stream...</span>
+                <div role="status" className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-black/80">
+                    <Loader2 className="h-8 w-8 animate-spin text-violet-500" />
+                    <span className="text-xs text-slate-400">Carregando vídeo...</span>
                 </div>
             )}
-
             {error && (
-                <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/80">
-                    <AlertCircle className="w-8 h-8 text-red-500" />
-                    <span className="text-xs text-red-400 mt-2">{error}</span>
-                </div>
-            )}
-
-            {!loading && !error && (
-                <div className="absolute top-2 left-2 flex items-center gap-1.5 px-2 py-1 bg-black/50 backdrop-blur-sm rounded-md">
-                    <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
-                    <span className="text-xs text-white font-medium">AO VIVO</span>
+                <div role="alert" className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-black/80 p-3 text-center text-red-300">
+                    <AlertCircle className="h-8 w-8" />
+                    <span className="text-xs">{error}</span>
                 </div>
             )}
         </div>

@@ -9,65 +9,33 @@ use crate::encoder::{
     get_ffmpeg_path, AudioConfig, VideoEncoderConfig,
 };
 use crate::output::HlsConfig;
-use std::io::Write;
-use std::process::{Child, Command, Stdio};
+use crate::AppSettings;
+use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 
 /// FFmpeg process wrapper para streaming HLS
 pub struct FfmpegEncoder {
     process: Child,
-    width: u32,
-    height: u32,
 }
 
 impl FfmpegEncoder {
     pub fn new(
-        width: u32,
-        height: u32,
-        fps: u32,
-        bitrate: u32,
-        list_size: u32,
-        hls_time: f64,
-        output_dir: &str,
-        stream_id: &str,
-        enable_hw_accel: bool,
-        ffmpeg_preset: String,
-        gpu_preset: String,
-        enable_audio: bool,
-        enable_microphone: bool,
-        audio_bitrate: u32,
-        audio_buffer_size: u32,
-        audio_offset: i32,
-        audio_device: String,
-        microphone_device: String,
-        audio_filters: String,
-        microphone_filters: String,
+        settings: &AppSettings,
+        audio_config: AudioConfig,
+        hls_config: &HlsConfig,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        // Configuração de áudio
-        let audio_config = AudioConfig {
-            enabled: enable_audio,
-            microphone_enabled: enable_microphone,
-            device: audio_device,
-            microphone_device,
-            bitrate: audio_bitrate,
-            buffer_size: audio_buffer_size,
-            offset_ms: audio_offset,
-            audio_filters,
-            microphone_filters,
-        };
-
-        // Configuração de encoder
-        let (codec, preset_args) = get_encoder_config(enable_hw_accel, &ffmpeg_preset, &gpu_preset);
+        let (codec, preset_args) = get_encoder_config(
+            settings.enable_hw_accel,
+            &settings.ffmpeg_preset,
+            &settings.gpu_preset,
+        );
         let video_config = VideoEncoderConfig {
             codec,
             preset_args,
-            width,
-            height,
-            fps,
-            bitrate,
+            width: settings.width,
+            height: settings.height,
+            fps: settings.framerate,
+            bitrate: settings.bitrate,
         };
-
-        // Configuração de output HLS (low_latency=false para estabilidade de áudio)
-        let hls_config = HlsConfig::new(output_dir, stream_id, list_size, hls_time);
 
         Self::spawn_process(video_config, audio_config, hls_config)
     }
@@ -76,7 +44,7 @@ impl FfmpegEncoder {
     fn spawn_process(
         video_config: VideoEncoderConfig,
         audio_config: AudioConfig,
-        hls_config: HlsConfig,
+        hls_config: &HlsConfig,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let ffmpeg_path = get_ffmpeg_path();
 
@@ -85,8 +53,26 @@ impl FfmpegEncoder {
 
         // Inicia comando FFmpeg
         let mut command = Command::new(&ffmpeg_path);
+        let filter_threads = if video_config.width * video_config.height > 1920 * 1080 {
+            "4"
+        } else {
+            "2"
+        };
         // Configuração mínima - sem flags de sincronização
-        command.arg("-y");
+        command.args([
+            "-hide_banner",
+            "-loglevel",
+            "warning",
+            "-nostats",
+            "-nostdin",
+            "-filter_threads",
+            filter_threads,
+            "-filter_complex_threads",
+            "2",
+            "-sws_flags",
+            "fast_bilinear",
+            "-y",
+        ]);
 
         // ===== INPUTS =====
 
@@ -180,61 +166,35 @@ impl FfmpegEncoder {
             video_config.codec
         );
 
-        Ok(Self {
-            process,
-            width: video_config.width,
-            height: video_config.height,
-        })
+        Ok(Self { process })
     }
 
-    /// Escrever um frame BGRA raw para o FFmpeg
-    pub fn write_frame(
-        &mut self,
-        data: &[u8],
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        let expected_size = (self.width * self.height * 4) as usize;
-        if data.len() != expected_size {
-            return Err(format!(
-                "Tamanho de frame incorreto: esperado {}, recebido {}",
-                expected_size,
-                data.len()
-            )
-            .into());
-        }
+    pub fn take_input(&mut self) -> Option<ChildStdin> {
+        self.process.stdin.take()
+    }
 
-        if let Some(stdin) = self.process.stdin.as_mut() {
-            stdin.write_all(data)?;
+    pub fn try_wait(&mut self) -> std::io::Result<Option<ExitStatus>> {
+        self.process.try_wait()
+    }
+
+    pub fn stop(&mut self) -> std::io::Result<()> {
+        if self.process.try_wait()?.is_none() {
+            if let Err(error) = self.process.kill() {
+                if self.process.try_wait()?.is_none() {
+                    return Err(error);
+                }
+            } else {
+                self.process.wait()?;
+            }
         }
         Ok(())
-    }
-
-    /// Parar processo FFmpeg imediatamente
-    pub fn stop(&mut self) {
-        tracing::info!("🛑 Parando FFmpeg...");
-
-        // Fechar stdin para sinalizar fim do stream
-        drop(self.process.stdin.take());
-
-        // Matar o processo imediatamente ao invés de esperar
-        match self.process.kill() {
-            Ok(_) => {
-                tracing::info!("✅ Processo FFmpeg terminado");
-                // Aguardar para garantir que recursos sejam liberados
-                let _ = self.process.wait();
-            }
-            Err(e) => {
-                tracing::warn!("⚠️ Erro ao matar processo FFmpeg: {}", e);
-                // Tentar esperar mesmo assim
-                let _ = self.process.wait();
-            }
-        }
-
-        tracing::info!("✅ FFmpeg completamente parado");
     }
 }
 
 impl Drop for FfmpegEncoder {
     fn drop(&mut self) {
-        self.stop();
+        if let Err(error) = self.stop() {
+            tracing::warn!(%error, "Falha ao encerrar o FFmpeg");
+        }
     }
 }

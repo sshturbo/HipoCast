@@ -4,7 +4,7 @@ import { Input } from '@/components/ui/input';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
 import { Select } from '@/components/ui/select';
-import { fetchSettings, updateSettings, getStatus, stopStream, startStream } from '@/api/streams';
+import { fetchSettings, updateSettings } from '@/api/streams';
 import { Save, RefreshCcw, Video, Server, Clock, Loader2, Volume2, Mic, Settings2, Cpu } from 'lucide-react';
 import { motion } from 'framer-motion';
 import { AudioDeviceSelector } from './AudioDeviceSelector';
@@ -30,33 +30,14 @@ export default function SettingsPage() {
         setSaving(true);
         setMessage(null);
         try {
-            // Verificar se há transmissão ativa
-            const status = await getStatus();
-            const activeStream = status.streams?.find(s => s.status === 'running');
-
-            // Salvar configurações
-            await updateSettings(settings);
-
-            // Se houver transmissão ativa, reiniciar para aplicar mudanças
-            if (activeStream) {
-                setMessage({ type: 'info', text: 'Reiniciando transmissão para aplicar mudanças...' });
-
-                // Parar transmissão
-                await stopStream(activeStream.id);
-
-                // Aguardar 1 segundo para garantir que parou
-                await new Promise(resolve => setTimeout(resolve, 1000));
-
-                // Reiniciar transmissão
-                await startStream(activeStream.id, activeStream.title);
-
-                setMessage({ type: 'success', text: 'Configurações aplicadas e transmissão reiniciada!' });
-            } else {
-                setMessage({ type: 'success', text: 'Configurações salvas com sucesso!' });
-            }
+            const restarting = await updateSettings(settings);
+            setMessage({
+                type: 'success',
+                text: restarting ? 'Configurações salvas. A transmissão está iniciando novamente.' : 'Configurações salvas.'
+            });
         } catch (err) {
             console.error('Erro ao salvar:', err);
-            setMessage({ type: 'error', text: 'Erro ao salvar configurações.' });
+            setMessage({ type: 'error', text: typeof err === 'string' ? err : 'Erro ao salvar configurações.' });
         } finally {
             setSaving(false);
         }
@@ -117,6 +98,25 @@ export default function SettingsPage() {
                         </CardTitle>
                     </CardHeader>
                     <CardContent className="pt-6 space-y-4">
+                        <div className="flex items-center justify-between gap-3">
+                            <span className="text-xs text-slate-400">720p · 30 FPS · 2 Mbps</span>
+                            <Button
+                                variant="secondary"
+                                size="sm"
+                                onClick={() => setSettings((current) => ({
+                                    ...current,
+                                    width: 1280,
+                                    height: 720,
+                                    framerate: 30,
+                                    bitrate: 2000000,
+                                    enableHwAccel: true,
+                                    gpuPreset: 'performance',
+                                    ffmpegPreset: 'ultrafast',
+                                }))}
+                            >
+                                Usar modo leve
+                            </Button>
+                        </div>
                         <div className="space-y-2">
                             <label className="text-xs font-medium text-slate-500">Framerate (FPS)</label>
                             <Select
@@ -126,7 +126,7 @@ export default function SettingsPage() {
                             >
                                 <option value="15">15 FPS (Leve)</option>
                                 <option value="30">30 FPS (Padrão)</option>
-                                <option value="60">60 FPS (Alta Performance)</option>
+                                <option value="60">60 FPS (Mais fluidez)</option>
                             </Select>
                         </div>
                         <div className="space-y-2">
@@ -224,7 +224,7 @@ export default function SettingsPage() {
                                 onChange={(e) => setSettings(prev => ({ ...prev, ffmpegPreset: e.target.value }))}
                                 className="bg-slate-900 border-slate-700 w-full h-10 text-sm"
                             >
-                                <option value="ultrafast">Ultrafast (Melhor)</option>
+                                <option value="ultrafast">Ultrafast (Menos uso de CPU)</option>
                                 <option value="superfast">Superfast</option>
                                 <option value="veryfast">Veryfast</option>
                                 <option value="faster">Faster</option>

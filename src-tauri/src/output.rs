@@ -49,12 +49,16 @@ impl HlsConfig {
         format!("{}/{}.m3u8", self.stream_dir(), self.stream_id)
     }
 
+    pub fn playlist_route(&self) -> String {
+        format!("/streams/{0}/{0}.m3u8", self.stream_id)
+    }
+
     /// Retorna o padrão de nome dos segmentos
     pub fn segment_pattern(&self) -> String {
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
+            .unwrap_or_default()
+            .as_millis();
         format!(
             "{}/{}_{}_seg_%03d.m4s",
             self.stream_dir(),
@@ -77,11 +81,24 @@ impl HlsConfig {
         Ok(())
     }
 
+    pub fn playlist_is_ready(&self) -> bool {
+        let directory = std::path::PathBuf::from(self.stream_dir());
+        let Ok(playlist) = std::fs::read_to_string(self.playlist_path()) else {
+            return false;
+        };
+        playlist.starts_with("#EXTM3U")
+            && directory.join("init.mp4").is_file()
+            && playlist
+                .lines()
+                .any(|line| line.ends_with(".m4s") && directory.join(line).is_file())
+    }
+
     /// Gera argumentos HLS para FFmpeg
     pub fn to_ffmpeg_args(&self) -> Vec<String> {
         // Flags base para HLS - NÃO usar split_by_time (causa problemas de áudio)
         let mut hls_flags =
-            "delete_segments+discont_start+independent_segments+program_date_time".to_string();
+            "delete_segments+discont_start+independent_segments+program_date_time+temp_file"
+                .to_string();
 
         let mut args = vec![
             "-f".to_string(),
@@ -106,7 +123,8 @@ impl HlsConfig {
         }
 
         if self.list_size == 0 {
-            hls_flags = "discont_start+independent_segments+program_date_time".to_string();
+            hls_flags =
+                "discont_start+independent_segments+program_date_time+temp_file".to_string();
             args.extend(["-hls_playlist_type".to_string(), "event".to_string()]);
         }
 
@@ -128,8 +146,6 @@ impl HlsConfig {
         vec![
             "-hls_segment_filename".to_string(),
             self.segment_pattern(),
-            "-threads".to_string(),
-            "0".to_string(),
             self.playlist_path(),
         ]
     }

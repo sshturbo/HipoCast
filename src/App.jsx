@@ -1,53 +1,61 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { listen } from '@tauri-apps/api/event';
 import Sidebar from '@/components/Sidebar';
 import ControlPanel from '@/components/ControlPanel';
 import StreamGrid from '@/components/StreamGrid';
 import SettingsPage from '@/components/SettingsPage';
 import TitleBar from '@/components/TitleBar';
-import { getStatus, fetchSettings } from '@/api/streams';
-import { Badge } from '@/components/ui/badge';
-import { Radio, Search, Bell, Video } from 'lucide-react';
+import { getStatus } from '@/api/streams';
+import { Radio, Video } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 
 export default function App() {
     const [streams, setStreams] = useState([]);
-    const [activeCount, setActiveCount] = useState(0);
     const [activeTab, setActiveTab] = useState('streaming');
-    const [settings, setSettings] = useState(null);
     const [loading, setLoading] = useState(true);
+    const [serverError, setServerError] = useState(null);
+    const [previewEnabled, setPreviewEnabled] = useState(() => localStorage.getItem('hipocast.previewEnabled') !== 'false');
+    const latestRequest = useRef(0);
 
-    useEffect(() => {
-        initApp();
+    const loadStatus = useCallback(async () => {
+        const request = ++latestRequest.current;
+        const data = await getStatus();
+        if (request === latestRequest.current) {
+            setStreams(data.streams || []);
+            setServerError(data.serverError);
+            setLoading(false);
+        }
     }, []);
 
     useEffect(() => {
-        if (settings) {
-            const interval = setInterval(loadStatus, settings?.updateInterval || 5000);
-            return () => clearInterval(interval);
-        }
-    }, [settings?.updateInterval]);
+        let disposed = false;
+        let unsubscribe;
+        let fallback;
+        listen('hipocast:stream-status', loadStatus).then((unlisten) => {
+            if (disposed) {
+                unlisten();
+                return;
+            }
+            unsubscribe = unlisten;
+            loadStatus();
+        }).catch(() => {
+            if (!disposed) {
+                loadStatus();
+                fallback = setInterval(loadStatus, 1000);
+            }
+        });
+        return () => {
+            disposed = true;
+            unsubscribe?.();
+            clearInterval(fallback);
+            latestRequest.current++;
+        };
+    }, [loadStatus]);
 
-    const initApp = async () => {
-        setLoading(true);
-        // Carrega configurações diretamente (sem verificar FFmpeg)
-        const s = await fetchSettings();
-        setSettings(s);
-        await loadStatus();
-        setLoading(false);
-    };
-
-    const loadStatus = async () => {
-        const data = await getStatus();
-        setStreams(data.streams || []);
-        setActiveCount(data.active || 0);
-    };
-
-    const handleStreamStarted = () => {
-        loadStatus();
-    };
-
-    const handleStreamStopped = () => {
-        loadStatus();
+    const changePreview = (event) => {
+        const enabled = event.target.checked;
+        setPreviewEnabled(enabled);
+        localStorage.setItem('hipocast.previewEnabled', String(enabled));
     };
 
     // Splash Screen durante carregamento
@@ -101,7 +109,7 @@ export default function App() {
                                         <p className="text-slate-400 text-sm italic">Engine de HLS Ultra-Otimizada via FFmpeg Pipeline</p>
                                     </div>
 
-                                    <ControlPanel onStreamStarted={handleStreamStarted} />
+                                    <ControlPanel onStreamStarted={loadStatus} serverError={serverError} />
 
                                     <section className="space-y-4">
                                         <div className="flex items-center justify-between">
@@ -109,9 +117,12 @@ export default function App() {
                                                 <Radio className="w-5 h-5 text-violet-400" />
                                                 <h2 className="text-lg font-bold text-white">Transmissões Ativas</h2>
                                             </div>
-                                            <span className="text-xs text-slate-500 uppercase font-bold tracking-tighter">Atualizado em tempo real</span>
+                                            <label className="flex cursor-pointer items-center gap-2 text-xs text-slate-300">
+                                                <input type="checkbox" checked={previewEnabled} onChange={changePreview} className="accent-violet-500" />
+                                                Prévia ao vivo
+                                            </label>
                                         </div>
-                                        <StreamGrid streams={streams} onStreamStopped={handleStreamStopped} />
+                                        <StreamGrid streams={streams} onStreamStopped={loadStatus} previewEnabled={previewEnabled} />
                                     </section>
                                 </motion.div>
                             ) : activeTab === 'settings' ? (

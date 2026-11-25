@@ -38,11 +38,11 @@ impl Default for DbSettings {
     fn default() -> Self {
         Self {
             id: None,
-            framerate: 60,
+            framerate: 30,
             hls_time: 2.0,
             hls_server_port: 8080,
-            bitrate: 6_000_000,
-            enable_audio: true,
+            bitrate: 2_000_000,
+            enable_audio: false,
             enable_microphone: false,
             audio_bitrate: 128,
             audio_buffer_size: 20,
@@ -75,6 +75,7 @@ pub struct DbStream {
     pub created_at: String,
     pub source_type: String,
     pub source_url: Option<String>,
+    pub source_id: Option<String>,
 }
 
 pub struct Database {
@@ -84,7 +85,10 @@ pub struct Database {
 impl Database {
     pub fn init(path: &Path) -> Result<Self> {
         let conn = Connection::open(path)?;
+        Self::initialize(conn)
+    }
 
+    fn initialize(conn: Connection) -> Result<Self> {
         // Create settings table
         conn.execute(
             "CREATE TABLE IF NOT EXISTS settings (
@@ -291,10 +295,10 @@ impl Database {
             );
         }
         if !has_audio_dev {
-            let _ = conn.execute("ALTER TABLE settings ADD COLUMN audio_device TEXT NOT NULL DEFAULT 'virtual-audio-capturer'", []);
+            let _ = conn.execute("ALTER TABLE settings ADD COLUMN audio_device TEXT NOT NULL DEFAULT ''", []);
         }
         if !has_mic_dev {
-            let _ = conn.execute("ALTER TABLE settings ADD COLUMN microphone_device TEXT NOT NULL DEFAULT 'virtual-audio-capturer'", []);
+            let _ = conn.execute("ALTER TABLE settings ADD COLUMN microphone_device TEXT NOT NULL DEFAULT ''", []);
         }
         if !has_global_preset {
             let _ = conn.execute(
@@ -336,10 +340,12 @@ impl Database {
         // Ensure default settings exist
         let count: i32 = conn.query_row("SELECT COUNT(*) FROM settings", [], |row| row.get(0))?;
         if count == 0 {
+            let defaults = DbSettings::default();
             conn.execute(
                 "INSERT INTO settings (framerate, hls_time, hls_server_port, bitrate, enable_audio, hls_list_size, width, height, enable_hw_accel, ffmpeg_preset)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
-                params![60, 2.0, 8080, 6_000_000, true, 5, 1280, 720, true, "ultrafast"],
+                params![defaults.framerate, defaults.hls_time, defaults.hls_server_port, defaults.bitrate, defaults.enable_audio,
+                    defaults.hls_list_size, defaults.width, defaults.height, defaults.enable_hw_accel, defaults.ffmpeg_preset],
             )?;
         }
 
@@ -352,17 +358,19 @@ impl Database {
                 hls_path TEXT NOT NULL,
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 source_type TEXT NOT NULL DEFAULT 'window',
-                source_url TEXT
+                source_url TEXT,
+                source_id TEXT
             )",
             [],
         )?;
 
         // Migration: Add source_type and source_url if they don't exist
-        let (has_source_type, has_source_url) = {
+        let (has_source_type, has_source_url, has_source_id) = {
             let mut stmt = conn.prepare("PRAGMA table_info(streams)")?;
             let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
             let mut has_source_type = false;
             let mut has_source_url = false;
+            let mut has_source_id = false;
             for name_result in rows {
                 if let Ok(name) = name_result {
                     if name == "source_type" {
@@ -371,9 +379,12 @@ impl Database {
                     if name == "source_url" {
                         has_source_url = true;
                     }
+                    if name == "source_id" {
+                        has_source_id = true;
+                    }
                 }
             }
-            (has_source_type, has_source_url)
+            (has_source_type, has_source_url, has_source_id)
         };
 
         if !has_source_type {
@@ -384,6 +395,9 @@ impl Database {
         }
         if !has_source_url {
             let _ = conn.execute("ALTER TABLE streams ADD COLUMN source_url TEXT", []);
+        }
+        if !has_source_id {
+            conn.execute("ALTER TABLE streams ADD COLUMN source_id TEXT", [])?;
         }
 
         // Initialize stream audio config table
@@ -468,24 +482,28 @@ impl Database {
     pub fn add_stream(&self, stream: &DbStream) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT OR REPLACE INTO streams (id, title, status, hls_path, source_type, source_url) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![stream.id, stream.title, stream.status, stream.hls_path, stream.source_type, stream.source_url],
+            "INSERT INTO streams (id, title, status, hls_path, created_at, source_type, source_url, source_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+             ON CONFLICT(id) DO UPDATE SET title = excluded.title, status = excluded.status,
+                hls_path = excluded.hls_path, source_type = excluded.source_type,
+                source_url = excluded.source_url, source_id = excluded.source_id",
+            params![stream.id, stream.title, stream.status, stream.hls_path, stream.created_at, stream.source_type, stream.source_url, stream.source_id],
         )?;
         Ok(())
     }
 
-    pub fn update_stream_status(&self, id: &str, status: &str) -> Result<()> {
+    pub fn stream_path_in_use(&self, id: &str, hls_path: &str) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "UPDATE streams SET status = ?1 WHERE id = ?2",
-            params![status, id],
-        )?;
-        Ok(())
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM streams WHERE id != ?1 AND hls_path = ?2 COLLATE NOCASE)",
+            params![id, hls_path],
+            |row| row.get(0),
+        )
     }
 
     pub fn get_all_streams(&self) -> Result<Vec<DbStream>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare("SELECT id, title, status, hls_path, created_at, source_type, source_url FROM streams ORDER BY created_at DESC")?;
+        let mut stmt = conn.prepare("SELECT id, title, status, hls_path, created_at, source_type, source_url, source_id FROM streams ORDER BY created_at DESC")?;
 
         let streams = stmt.query_map([], |row| {
             Ok(DbStream {
@@ -498,6 +516,7 @@ impl Database {
                     .get::<_, Option<String>>(5)?
                     .unwrap_or("window".to_string()),
                 source_url: row.get(6)?,
+                source_id: row.get(7)?,
             })
         })?;
 
@@ -509,14 +528,14 @@ impl Database {
     }
 
     pub fn remove_stream(&self, id: &str) -> Result<()> {
-        let conn = self.conn.lock().unwrap();
-        conn.execute("DELETE FROM streams WHERE id = ?1", params![id])?;
-        // Also remove stream audio config if exists
-        let _ = conn.execute(
+        let mut conn = self.conn.lock().unwrap();
+        let transaction = conn.transaction()?;
+        transaction.execute("DELETE FROM streams WHERE id = ?1", params![id])?;
+        transaction.execute(
             "DELETE FROM stream_audio_config WHERE stream_id = ?1",
             params![id],
-        );
-        Ok(())
+        )?;
+        transaction.commit()
     }
 }
 
@@ -659,5 +678,40 @@ impl Database {
                 volume: settings.global_microphone_volume,
             },
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_stream_schema_preserves_records_and_saves_source_id() -> Result<()> {
+        let connection = Connection::open_in_memory()?;
+        connection.execute_batch(
+            "CREATE TABLE streams (
+                id TEXT PRIMARY KEY, title TEXT NOT NULL, status TEXT NOT NULL,
+                hls_path TEXT NOT NULL, created_at TEXT NOT NULL,
+                source_type TEXT NOT NULL, source_url TEXT
+            );
+            INSERT INTO streams VALUES
+                ('window:42', 'Janela antiga', 'running', '/streams/window_42/window_42.m3u8',
+                '2025-01-01T00:00:00+00:00', 'window', NULL);",
+        )?;
+        let database = Database::initialize(connection)?;
+        assert!(!database.get_settings()?.enable_audio);
+        let mut stream = database.get_all_streams()?.pop().unwrap();
+        assert_eq!(stream.id, "window:42");
+        assert!(stream.source_id.is_none());
+        stream.id = "sala".to_string();
+        stream.source_id = Some("window:42".to_string());
+        stream.hls_path = "/streams/sala/sala.m3u8".to_string();
+        database.add_stream(&stream)?;
+        assert!(database.stream_path_in_use("SALA", "/streams/SALA/SALA.m3u8")?);
+        let records = database.get_all_streams()?;
+        assert_eq!(records.len(), 2);
+        let new = records.iter().find(|record| record.id == "sala").unwrap();
+        assert_eq!(new.source_id.as_deref(), Some("window:42"));
+        Ok(())
     }
 }

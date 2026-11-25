@@ -1,82 +1,107 @@
+use crate::commands::capture_cmd::{output_name, stop_capture};
 use crate::db::DbStream;
 use crate::state::{AppState, StatusResponse, StreamStatus};
 use tauri::State;
 
 #[tauri::command]
 pub fn get_status(state: State<'_, AppState>) -> StatusResponse {
-    // Get streams from DB and join with port
-    let settings = state.db.get_settings().unwrap_or_default();
-    let port = settings.hls_server_port;
+    let port = state
+        .hls_server
+        .as_ref()
+        .copied()
+        .unwrap_or_else(|_| state.db.get_settings().unwrap_or_default().hls_server_port);
+    let saved = state.db.get_all_streams().unwrap_or_else(|error| {
+        tracing::error!(%error, "Falha ao carregar as transmissões");
+        Vec::new()
+    });
+    let runtime = state.runtime.lock().unwrap();
+    let streams: Vec<_> = saved
+        .into_iter()
+        .map(|stream| {
+            let live = runtime.get(&stream.id);
+            StreamStatus {
+                status: live.map_or("stopped", |entry| entry.status).to_string(),
+                message: live.and_then(|entry| entry.message.clone()),
+                playback_id: live.map(|entry| entry.playback_id.clone()),
+                hls_path: format!("http://127.0.0.1:{port}{}", stream.hls_path),
+                id: stream.id,
+                title: stream.title,
+            }
+        })
+        .collect();
+    let active = streams
+        .iter()
+        .filter(|stream| stream.status == "running")
+        .count();
+    StatusResponse {
+        streams,
+        active,
+        server_error: state.hls_server.as_ref().err().cloned(),
+    }
+}
 
-    let streams = match state.db.get_all_streams() {
-        Ok(db_streams) => db_streams
-            .into_iter()
-            .map(|s| StreamStatus {
-                id: s.id,
-                title: s.title,
-                status: s.status,
-                hls_path: format!("http://localhost:{}{}", port, s.hls_path),
-            })
-            .collect(),
-        Err(e) => {
-            tracing::error!("Failed to fetch streams: {}", e);
-            Vec::new()
-        }
-    };
-
-    let active = streams.iter().filter(|s| s.status == "running").count();
-
-    StatusResponse { streams, active }
+pub(crate) fn find_stream(state: &AppState, id: &str) -> Result<DbStream, String> {
+    state
+        .db
+        .get_all_streams()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .find(|stream| stream.id == id)
+        .ok_or_else(|| "Transmissão não encontrada.".into())
 }
 
 #[tauri::command]
 pub fn get_stream_info(state: State<'_, AppState>, stream_id: String) -> Result<DbStream, String> {
-    match state.db.get_all_streams() {
-        Ok(streams) => streams
-            .into_iter()
-            .find(|s| s.id == stream_id)
-            .ok_or_else(|| "Stream not found".to_string()),
-        Err(e) => Err(format!("Database error: {}", e)),
-    }
+    let mut stream = find_stream(&state, &stream_id)?;
+    stream.status = state
+        .runtime
+        .lock()
+        .unwrap()
+        .get(&stream_id)
+        .map_or("stopped", |entry| entry.status)
+        .into();
+    Ok(stream)
 }
 
 #[tauri::command]
-pub fn remove_stream(state: State<'_, AppState>, id: String) -> StatusResponse {
-    // If it's the active stream, stop it first
-    {
-        let mut active_id = state.active_stream_id.lock().unwrap();
-        if let Some(active) = active_id.as_ref() {
-            if active == &id {
-                let mut handle = state.capture_handle.lock().unwrap();
-                *handle = None;
-                *active_id = None;
-            }
-        }
-    } // Drop lock before IO
-
-    // Fechar janela do browser específica desta stream (se existir)
-    {
-        let mut b_wins = state.browser_windows.lock().unwrap();
-        if let Some(win) = b_wins.remove(&id) {
-            let _ = win.close();
-        }
+pub async fn remove_stream(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<StatusResponse, String> {
+    let mut capture = state.capture.lock().await;
+    let stream = find_stream(&state, &id)?;
+    if capture.as_ref().is_some_and(|active| active.id == id) {
+        stop_capture(&state, &mut capture).await?;
     }
 
-    // Remove from DB
-    if let Err(e) = state.db.remove_stream(&id) {
-        tracing::error!("Failed to remove stream from DB: {}", e);
-    }
-
-    // Remove files from disk using GLOBAL path
-    let stream_dir = state.streams_path.join(id.replace(":", "_"));
-
-    if stream_dir.exists() {
-        if let Err(e) = std::fs::remove_dir_all(&stream_dir) {
-            tracing::error!("Failed to remove stream directory: {}", e);
-        } else {
-            tracing::info!("Removed stream files: {:?}", stream_dir);
+    if let Ok(name) = output_name(&id) {
+        let expected_path = format!("/streams/{name}/{name}.m3u8");
+        let shared = state
+            .db
+            .stream_path_in_use(&id, &expected_path)
+            .map_err(|error| error.to_string())?;
+        if !shared && stream.hls_path == expected_path {
+            let directory = state.streams_path.join(name);
+            tauri::async_runtime::spawn_blocking(move || {
+                match std::fs::remove_dir_all(directory) {
+                    Ok(()) => Ok(()),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                    Err(error) => Err(format!("Falha ao remover os arquivos HLS: {error}")),
+                }
+            })
+            .await
+            .map_err(|error| error.to_string())??;
         }
     }
 
-    get_status(state)
+    state
+        .db
+        .remove_stream(&id)
+        .map_err(|error| error.to_string())?;
+    state.runtime.lock().unwrap().remove(&id);
+    let window = state.browser_windows.lock().unwrap().remove(&id);
+    if let Some((_, window)) = window {
+        let _ = window.destroy();
+    }
+    Ok(get_status(state.clone()))
 }

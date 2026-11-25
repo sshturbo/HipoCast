@@ -1,17 +1,22 @@
 use axum::{http::header, response::IntoResponse, Router};
-use std::net::SocketAddr;
+use std::io::{BufRead, BufReader, Write};
+use std::net::{Ipv4Addr, SocketAddr, TcpListener as StdTcpListener, TcpStream};
+use std::path::PathBuf;
+use std::time::Duration;
 use tokio::net::TcpListener;
 use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
 
-pub async fn start_server(port: u16, static_dir: String) {
-    let streams_path = std::path::Path::new(&static_dir).to_path_buf();
-
-    tracing::info!(
-        "Starting HLS server on port {} serving from {:?}",
-        port,
-        streams_path
-    );
+pub fn start_server(port: u16, streams_path: PathBuf) -> Result<u16, String> {
+    let listener = StdTcpListener::bind((Ipv4Addr::LOCALHOST, port))
+        .map_err(|error| format!("Não foi possível abrir a porta HLS {port}: {error}"))?;
+    listener
+        .set_nonblocking(true)
+        .map_err(|error| error.to_string())?;
+    let port = listener
+        .local_addr()
+        .map_err(|error| error.to_string())?
+        .port();
 
     let app = Router::new()
         .nest_service(
@@ -21,22 +26,36 @@ pub async fn start_server(port: u16, static_dir: String) {
         .layer(axum::middleware::from_fn(add_cache_headers))
         .layer(CorsLayer::permissive());
 
-    let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    tracing::info!("HLS Server listening on {}", addr);
-
-    match TcpListener::bind(addr).await {
-        Ok(listener) => {
-            tracing::info!("✅ HLS Server successfully bound to {}", addr);
-            if let Err(e) = axum::serve(listener, app).await {
-                tracing::error!("❌ HLS Server error: {}", e);
+    tauri::async_runtime::spawn(async move {
+        match TcpListener::from_std(listener) {
+            Ok(listener) => {
+                tracing::info!(port, "Servidor HLS disponível");
+                if let Err(error) = axum::serve(listener, app).await {
+                    tracing::error!(%error, "Falha no servidor HLS");
+                }
             }
+            Err(error) => tracing::error!(%error, "Falha no servidor HLS"),
         }
-        Err(e) => {
-            tracing::error!("❌ Failed to bind HLS server to {}: {}", addr, e);
-            tracing::error!("   The port is likely already in use. Server will not start.");
-            tracing::error!("   Streams can still be created but won't be accessible via HTTP.");
-        }
-    }
+    });
+    Ok(port)
+}
+
+pub fn playlist_is_served(port: u16, route: &str) -> bool {
+    let check = || -> std::io::Result<bool> {
+        let timeout = Duration::from_millis(250);
+        let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
+        let mut stream = TcpStream::connect_timeout(&address, timeout)?;
+        stream.set_read_timeout(Some(timeout))?;
+        stream.set_write_timeout(Some(timeout))?;
+        write!(
+            stream,
+            "HEAD {route} HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n"
+        )?;
+        let mut response = String::new();
+        BufReader::new(stream).read_line(&mut response)?;
+        Ok(response.starts_with("HTTP/1.1 200 "))
+    };
+    check().unwrap_or(false)
 }
 
 async fn add_cache_headers(
