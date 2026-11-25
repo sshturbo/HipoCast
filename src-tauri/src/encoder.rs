@@ -4,6 +4,7 @@
 //! Segue o princípio de responsabilidade única (SRP).
 
 use crate::state::AudioDeviceInfo;
+use crate::system_audio::{self, LoopbackInput, DEFAULT_OUTPUT};
 use std::io::Read;
 use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
@@ -30,6 +31,7 @@ pub struct AudioConfig {
     pub enabled: bool,
     pub microphone_enabled: bool,
     pub device: String,
+    pub(crate) system_loopback: Option<LoopbackInput>,
     pub microphone_device: String,
     pub bitrate: u32,
     pub buffer_size: u32,
@@ -44,6 +46,7 @@ impl Default for AudioConfig {
             enabled: false,
             microphone_enabled: false,
             device: String::new(),
+            system_loopback: None,
             microphone_device: String::new(),
             bitrate: 128,
             buffer_size: 40,
@@ -84,6 +87,28 @@ pub fn get_ffmpeg_path() -> PathBuf {
 }
 
 pub fn enumerate_audio_devices() -> Result<Vec<AudioDeviceInfo>, String> {
+    let has_default = system_audio::has_default_output();
+    let mut devices = match enumerate_directshow_devices() {
+        Ok(devices) => devices,
+        Err(error) if has_default => {
+            tracing::warn!(%error, "Falha ao listar os dispositivos DirectShow");
+            Vec::new()
+        }
+        Err(error) => return Err(error),
+    };
+    if has_default {
+        devices.insert(
+            0,
+            AudioDeviceInfo {
+                name: DEFAULT_OUTPUT.into(),
+                device_type: "loopback".into(),
+            },
+        );
+    }
+    Ok(devices)
+}
+
+pub(crate) fn enumerate_directshow_devices() -> Result<Vec<AudioDeviceInfo>, String> {
     let mut process = Command::new(get_ffmpeg_path())
         .args([
             "-hide_banner",
@@ -263,9 +288,13 @@ fn test_encoder(ffmpeg_path: &PathBuf, codec: &str) -> bool {
 
 pub fn build_audio_input_args(config: &AudioConfig) -> Vec<String> {
     let mut args = Vec::new();
-    for (enabled, device) in [
-        (config.enabled, &config.device),
-        (config.microphone_enabled, &config.microphone_device),
+    for (enabled, device, loopback) in [
+        (
+            config.enabled,
+            &config.device,
+            config.system_loopback.as_ref(),
+        ),
+        (config.microphone_enabled, &config.microphone_device, None),
     ] {
         if !enabled {
             continue;
@@ -275,6 +304,27 @@ pub fn build_audio_input_args(config: &AudioConfig) -> Vec<String> {
                 "-itsoffset".into(),
                 format!("{:.3}", f64::from(config.offset_ms) / 1000.0),
             ]);
+        }
+        if let Some(input) = loopback {
+            args.extend([
+                "-probesize".into(),
+                "32".into(),
+                "-analyzeduration".into(),
+                "1".into(),
+                "-f".into(),
+                input.demuxer.into(),
+                "-thread_queue_size".into(),
+                "256".into(),
+                "-sample_rate".into(),
+                input.sample_rate.to_string(),
+            ]);
+            if input.channel_mask == 0 {
+                args.extend(["-ac".into(), input.channels.to_string()]);
+            } else {
+                args.extend(["-ch_layout".into(), format!("0x{:x}", input.channel_mask)]);
+            }
+            args.extend(["-i".into(), input.path.clone()]);
+            continue;
         }
         args.extend([
             "-probesize".into(),

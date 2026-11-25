@@ -9,6 +9,7 @@ mod output;
 mod server;
 mod state;
 mod stream_config;
+mod system_audio;
 
 use commands::*;
 use db::Database;

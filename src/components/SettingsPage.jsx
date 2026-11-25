@@ -273,7 +273,7 @@ export default function SettingsPage() {
                                 <span className="text-sm font-medium text-slate-300 flex items-center gap-2">
                                     <Volume2 className="w-4 h-4" /> Captura de Áudio
                                 </span>
-                                <span className="text-xs text-slate-500 block">Ativa captura de som de aplicativos e navegador (WASAPI Loopback).</span>
+                                <span className="text-xs text-slate-500 block">Captura o som que os aplicativos reproduzem na saída de áudio do Windows.</span>
                             </div>
                             <div className="flex items-center gap-2">
                                 <div
@@ -324,7 +324,7 @@ export default function SettingsPage() {
                         <div className="p-4 rounded-xl bg-slate-950/20 border border-slate-800/50 space-y-3">
                             <div className="space-y-1">
                                 <span className="text-sm font-medium text-slate-300 block">Dispositivo de Captura</span>
-                                <span className="text-xs text-slate-500 block">Selecione o dispositivo de loopback (Stereo Mix).</span>
+                                <span className="text-xs text-slate-500 block">A saída padrão do Windows é usada automaticamente se o dispositivo salvo estiver indisponível.</span>
                             </div>
                             <AudioDeviceSelector
                                 settings={settings}
@@ -427,7 +427,7 @@ export default function SettingsPage() {
                                 <span className="text-sm font-medium text-slate-300 flex items-center gap-2">
                                     <Mic className="w-4 h-4" /> Captura de Microfone
                                 </span>
-                                <span className="text-xs text-slate-500 block">Captura áudio do microfone padrão e mixa com o áudio do sistema (WASAPI).</span>
+                                <span className="text-xs text-slate-500 block">Captura o microfone selecionado e permite mixar sua entrada com o áudio do sistema.</span>
                             </div>
                             <div className="flex items-center gap-2">
                                 <div

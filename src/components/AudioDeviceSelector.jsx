@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { listAudioDevices } from '../api/streams';
 
+const DEFAULT_OUTPUT = 'wasapi:default';
+
 /**
  * Componente para seleção de dispositivos de áudio
  * Permite usuário escolher dispositivo de sistema (loopback) e microfone
@@ -35,6 +37,10 @@ export function AudioDeviceSelector({ settings, onUpdate, deviceType }) {
     // Filtrar dispositivos por tipo
     const loopbackDevices = devices.filter(d => d.deviceType === 'loopback');
     const inputDevices = devices.filter(d => d.deviceType === 'input');
+    const hasDefaultOutput = loopbackDevices.some(device => device.name === DEFAULT_OUTPUT);
+    const selectedOutput = loopbackDevices.some(device => device.name === settings.audioDevice)
+        ? settings.audioDevice
+        : hasDefaultOutput ? DEFAULT_OUTPUT : '';
 
     // Se deviceType for especificado, mostrar apenas esse tipo
     const showLoopback = !deviceType || deviceType === 'loopback';
@@ -54,7 +60,7 @@ export function AudioDeviceSelector({ settings, onUpdate, deviceType }) {
                     <div className="selector-group">
                         <div className="flex justify-between items-center mb-2">
                             <label htmlFor="audio-device" className="text-sm font-medium text-slate-300">
-                                🔊 Dispositivo de Loopback
+                                🔊 Saída de áudio do sistema
                             </label>
                             <button
                                 onClick={() => loadDevices(true)}
@@ -66,22 +72,21 @@ export function AudioDeviceSelector({ settings, onUpdate, deviceType }) {
                         </div>
                         <select
                             id="audio-device"
-                            value={settings.audioDevice || ''}
+                            value={selectedOutput}
                             onChange={(e) => onUpdate({ ...settings, audioDevice: e.target.value })}
                             disabled={loading || loopbackDevices.length === 0}
                             className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-sm text-slate-300"
                         >
-                            <option value="">Selecione um dispositivo</option>
-                            {loopbackDevices.map((device, idx) => (
-                                <option key={idx} value={device.name}>
-                                    {device.name}
+                            {!hasDefaultOutput && <option value="">Selecione um dispositivo</option>}
+                            {loopbackDevices.map(device => (
+                                <option key={device.name} value={device.name}>
+                                    {device.name === DEFAULT_OUTPUT ? 'Saída padrão do Windows (WASAPI)' : device.name}
                                 </option>
                             ))}
                         </select>
                         {loopbackDevices.length === 0 && !loading && (
                             <small className="hint">
-                                ⚠️ Nenhum dispositivo de loopback encontrado.
-                                Habilite "Stereo Mix" nas configurações de áudio do Windows.
+                                ⚠️ Nenhuma saída de áudio encontrada. Confira se uma saída padrão está ativa no Windows.
                             </small>
                         )}
                     </div>

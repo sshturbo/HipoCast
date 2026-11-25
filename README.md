@@ -16,7 +16,7 @@ HipoCast é uma aplicação desktop desenvolvida com Tauri + React que permite c
 - ⚡ **Baixa Latência**: Streaming HLS otimizado para transmissão em tempo real
 
 ### Captura de Áudio
-- 🎵 **Áudio do Sistema**: Captura via DirectShow com um dispositivo de loopback, como Stereo Mix
+- 🎵 **Áudio do Sistema**: Captura da saída padrão do Windows via WASAPI, com suporte a dispositivos de loopback DirectShow
 - 🎙️ **Captura de Microfone**: Suporte a múltiplos dispositivos de entrada
 - 🎛️ **Presets de Efeitos**: Filtros de áudio profissionais (Podcast, Gaming, Professional)
 - 🔊 **Controle de Volume**: Ajuste independente de áudio do sistema e microfone
@@ -88,12 +88,12 @@ O instalador será gerado em `src-tauri/target/release/bundle/`
 
 ### 2. Configurar Áudio
 
-1. Para capturar áudio do sistema, habilite essa opção em Configurações e selecione um dispositivo de loopback.
+1. Para capturar áudio do sistema, habilite essa opção em Configurações. A saída padrão do Windows é usada automaticamente quando nenhuma outra saída de loopback disponível está selecionada.
 2. Em Ajustes da transmissão, escolha **Todo o Sistema**, **Somente microfone** ou **Mudo**. O modo mudo desativa as duas entradas.
 3. No modo **Todo o Sistema**, use **Incluir microfone** para combinar as duas entradas. Selecione o dispositivo de entrada sempre que usar o microfone.
 4. Ajuste os efeitos e clique em "Salvar". A transmissão ativa reinicia para aplicar os ajustes.
 
-O áudio por aplicação está indisponível. Se o dispositivo selecionado estiver ausente, o vídeo pode iniciar com o áudio restante ou em silêncio. O aviso aparece no card da transmissão.
+O áudio por aplicação está indisponível. Se a saída padrão estiver indisponível, o vídeo pode iniciar com o microfone ou em silêncio. O aviso aparece no card da transmissão.
 
 ### 3. Acessar a Stream
 
@@ -145,7 +145,7 @@ O modo leve aplica 1280 × 720, 30 FPS e 2 Mbps com aceleração por hardware qu
 
 ### Backend (Rust + Tauri)
 - **Captura de Vídeo**: Windows Graphics Capture API
-- **Captura de Áudio**: DirectShow via FFmpeg
+- **Captura de Áudio**: WASAPI para a saída padrão, DirectShow para o microfone e dispositivos de loopback compatíveis
 - **Codificação**: FFmpeg recebe os frames via pipe
 - **Servidor HLS**: Axum (HTTP server)
 - **Banco de Dados**: SQLite
@@ -176,7 +176,7 @@ HipoCast/
 - **React** - UI Framework
 - **Rust** - Backend de alta performance
 - **FFmpeg** - Codificação de mídia
-- **DirectShow** - Captura de áudio no Windows
+- **WASAPI e DirectShow** - Captura de áudio no Windows
 - **Graphics Capture API** - Captura de tela Windows
 - **Axum** - Servidor HTTP
 - **SQLite** - Banco de dados local

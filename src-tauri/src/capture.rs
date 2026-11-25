@@ -1,8 +1,10 @@
-use crate::encoder::{enumerate_audio_devices, AudioConfig};
+use crate::encoder::{enumerate_directshow_devices, AudioConfig};
 use crate::ffmpeg::FfmpegEncoder;
 use crate::gpu_scale::GpuScaler;
 use crate::output::HlsConfig;
+use crate::state::AudioDeviceInfo;
 use crate::stream_config::StreamAudioConfig;
+use crate::system_audio::{Loopback, DEFAULT_OUTPUT};
 use crate::AppSettings;
 use fast_image_resize::{images::Image, PixelType, ResizeAlg, ResizeOptions, Resizer};
 use serde::Serialize;
@@ -396,8 +398,24 @@ fn run_capture(
     frames: &Arc<Frames>,
     update: &impl Fn(&'static str, Option<String>),
 ) -> Result<(), String> {
-    let (mut audio, notice) = resolve_audio(settings, stream_audio);
-    let mut notice = notice;
+    let (mut audio, mut notice) = resolve_audio(settings, stream_audio);
+    if frames.state.lock().unwrap().stopping {
+        return Ok(());
+    }
+    let mut loopback = None;
+    if audio.enabled && audio.device == DEFAULT_OUTPUT {
+        match Loopback::start() {
+            Ok(source) => {
+                audio.system_loopback = Some(source.input());
+                loopback = Some(source);
+            }
+            Err(error) => {
+                tracing::warn!(%error, "Não foi possível abrir a saída WASAPI");
+                audio.enabled = false;
+                append_notice(&mut notice, "Saída de áudio padrão do Windows indisponível. Confira se uma saída está ativa.");
+            }
+        }
+    }
     loop {
         if frames.state.lock().unwrap().stopping {
             return Ok(());
@@ -406,10 +424,21 @@ fn run_capture(
             update("starting", notice.clone());
         }
         let outcome = run_capture_attempt(
-            source_id, settings, &audio, hls, hls_port, frames, &notice, update,
+            source_id,
+            settings,
+            &audio,
+            loopback.as_ref(),
+            hls,
+            hls_port,
+            frames,
+            &notice,
+            update,
         );
         if let Err(error) = &outcome {
-            if (audio.enabled || audio.microphone_enabled) && error.retry_without_audio {
+            let system_failed = error.system_failure.is_some() && loopback.is_some();
+            let audio_failed =
+                (audio.enabled || audio.microphone_enabled) && error.retry_without_audio;
+            if system_failed || audio_failed {
                 {
                     let mut state = frames.state.lock().unwrap();
                     if state.stopping {
@@ -420,12 +449,23 @@ fn run_capture(
                         state.recycle_pixels(frame.data);
                     }
                 }
-                tracing::warn!(stream = hls.stream_id(), error = %error.message, "Reiniciando sem áudio após falha do FFmpeg");
+                loopback = None;
                 audio.enabled = false;
-                audio.microphone_enabled = false;
-                notice = Some(
-                    "Falha no áudio do FFmpeg. A transmissão foi retomada em silêncio.".into(),
-                );
+                audio.system_loopback = None;
+                if let Some(failure) = &error.system_failure {
+                    tracing::warn!(stream = hls.stream_id(), error = %failure, "Reiniciando sem o áudio do sistema");
+                    append_notice(
+                        &mut notice,
+                        "O áudio do sistema foi interrompido. A transmissão foi retomada sem ele.",
+                    );
+                } else {
+                    tracing::warn!(stream = hls.stream_id(), error = %error.message, "Reiniciando sem áudio após falha do FFmpeg");
+                    audio.microphone_enabled = false;
+                    append_notice(
+                        &mut notice,
+                        "Falha no áudio do FFmpeg. A transmissão foi retomada em silêncio.",
+                    );
+                }
                 continue;
             }
         }
@@ -433,9 +473,18 @@ fn run_capture(
     }
 }
 
+fn append_notice(notice: &mut Option<String>, message: &str) {
+    let notice = notice.get_or_insert_with(String::new);
+    if !notice.is_empty() {
+        notice.push(' ');
+    }
+    notice.push_str(message);
+}
+
 struct AttemptError {
     message: String,
     retry_without_audio: bool,
+    system_failure: Option<String>,
 }
 
 impl From<String> for AttemptError {
@@ -443,6 +492,7 @@ impl From<String> for AttemptError {
         Self {
             message,
             retry_without_audio: false,
+            system_failure: None,
         }
     }
 }
@@ -451,6 +501,7 @@ fn run_capture_attempt(
     source_id: &str,
     settings: &AppSettings,
     audio: &AudioConfig,
+    loopback: Option<&Loopback>,
     hls: &HlsConfig,
     hls_port: u16,
     frames: &Arc<Frames>,
@@ -488,6 +539,7 @@ fn run_capture_attempt(
     let mut last_progress = started;
     let mut published = false;
     let mut ready = false;
+    let mut system_failure = None;
 
     let outcome = loop {
         let (stopping, source_closed) = {
@@ -501,6 +553,10 @@ fn run_capture_attempt(
             break Err(
                 "A fonte de captura foi fechada. Selecione a janela ou monitor novamente.".into(),
             );
+        }
+        if let Some(error) = loopback.and_then(Loopback::take_failure) {
+            system_failure = Some(error);
+            break Err("A captura da saída de áudio do Windows foi interrompida.".into());
         }
         match encoder.try_wait() {
             Ok(Some(status)) => {
@@ -566,6 +622,7 @@ fn run_capture_attempt(
         .map_err(|message| AttemptError {
             message,
             retry_without_audio: audio_buffer_failed(&read_encoder_log(encoder.log_path())),
+            system_failure: system_failure.or_else(|| loopback.and_then(Loopback::take_failure)),
         })
 }
 
@@ -695,27 +752,27 @@ fn resolve_audio(
 ) -> (AudioConfig, Option<String>) {
     let wants_system = matches!(stream.audio_mode.as_str(), "system" | "process");
     let wants_microphone = stream.audio_mode != "silent" && stream.enable_microphone;
-    let system_selected = wants_system && !settings.audio_device.trim().is_empty();
+    let legacy_system_selected = wants_system
+        && !settings.audio_device.trim().is_empty()
+        && settings.audio_device != DEFAULT_OUTPUT;
     let microphone_selected = wants_microphone && !stream.microphone_device.trim().is_empty();
-    let devices = if system_selected || microphone_selected {
-        enumerate_audio_devices().unwrap_or_else(|error| {
+    let devices = if legacy_system_selected || microphone_selected {
+        enumerate_directshow_devices().unwrap_or_else(|error| {
             tracing::warn!(%error, "Falha ao verificar os dispositivos de áudio");
             Vec::new()
         })
     } else {
         Vec::new()
     };
-    let available = |name: &str| devices.iter().any(|device| device.name == name);
-    let enabled = system_selected && available(&settings.audio_device);
-    let microphone_enabled = microphone_selected && available(&stream.microphone_device);
+    let microphone_enabled = microphone_selected
+        && devices
+            .iter()
+            .any(|device| device.device_type == "input" && device.name == stream.microphone_device);
     let mut notices = Vec::new();
     if stream.audio_mode == "process" {
         notices.push(
             "O áudio por processo está indisponível. Usando o áudio do sistema quando disponível.",
         );
-    }
-    if wants_system && !enabled {
-        notices.push("Dispositivo de áudio do sistema indisponível. Confira as configurações.");
     }
     if wants_microphone && !microphone_enabled {
         notices.push("Microfone indisponível. Confira as configurações.");
@@ -723,9 +780,10 @@ fn resolve_audio(
     let notice = (!notices.is_empty()).then(|| notices.join(" "));
     (
         AudioConfig {
-            enabled,
+            enabled: wants_system,
             microphone_enabled,
-            device: settings.audio_device.clone(),
+            device: resolve_system_device(&settings.audio_device, &devices).into(),
+            system_loopback: None,
             microphone_device: stream.microphone_device,
             bitrate: settings.audio_bitrate,
             buffer_size: settings.audio_buffer_size,
@@ -735,6 +793,17 @@ fn resolve_audio(
         },
         notice,
     )
+}
+
+fn resolve_system_device<'a>(selected: &'a str, devices: &[AudioDeviceInfo]) -> &'a str {
+    if devices
+        .iter()
+        .any(|device| device.device_type == "loopback" && device.name == selected)
+    {
+        selected
+    } else {
+        DEFAULT_OUTPUT
+    }
 }
 
 fn read_encoder_log(path: &Path) -> String {
@@ -955,6 +1024,24 @@ mod tests {
     }
 
     #[test]
+    fn unavailable_legacy_loopback_uses_windows_default_output() {
+        let devices = [
+            AudioDeviceInfo {
+                name: "Stereo Mix".into(),
+                device_type: "loopback".into(),
+            },
+            AudioDeviceInfo {
+                name: "Microfone".into(),
+                device_type: "input".into(),
+            },
+        ];
+        assert_eq!(resolve_system_device("Stereo Mix", &devices), "Stereo Mix");
+        for selection in ["", "virtual-audio-capturer", "Microfone", DEFAULT_OUTPUT] {
+            assert_eq!(resolve_system_device(selection, &devices), DEFAULT_OUTPUT);
+        }
+    }
+
+    #[test]
     fn synthetic_frames_generate_hls_over_http_and_stop() {
         let directory =
             std::env::temp_dir().join(format!("hipocast-test-{}", uuid::Uuid::new_v4()));
@@ -972,6 +1059,7 @@ mod tests {
             let route = hls.playlist_route();
             assert!(!playlist_is_served(port, &route));
             let stream_audio = StreamAudioConfig {
+                audio_mode: "microphone".into(),
                 enable_microphone: true,
                 ..StreamAudioConfig::default()
             };
